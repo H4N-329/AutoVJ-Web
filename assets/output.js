@@ -1,6 +1,6 @@
-import {openChannel,buildPlayer,VIDEO_RE,renderGenerative,plainYoutubeEmbed,youtubeError} from './shared.js';
+import {openChannel,buildPlayer,VIDEO_RE,renderGenerative,plainYoutubeEmbed,youtubeError,loadYT} from './shared.js';
 const $=id=>document.getElementById(id);
-let player=null,ready=false,videoId='',title='',artist='',showOverlay=true,currentMode='idle',stoppedEffect=null,lastTake=null,apiFailed=false,fallback=false,restarting=false;
+let player=null,playerInit=null,ready=false,videoId='',title='',artist='',showOverlay=true,currentMode='idle',stoppedEffect=null,lastTake=null,apiFailed=false,fallback=false,restarting=false;
 const channel=openChannel(handle);
 function send(type,data={}){channel.send({type,...data})}
 function setIssue(heading='',detail='',kind='error'){
@@ -28,9 +28,9 @@ function renderOverlay(){
 function displayFallback(reason){
  if(!VIDEO_RE.test(videoId))return;
  fallback=true;ready=false;player=null;
- plainYoutubeEmbed('output-player',videoId,{startSeconds:Number(lastTake?.startSeconds)||0,autoplay:false,muted:true});
+ plainYoutubeEmbed('output-player',videoId,{startSeconds:Number(lastTake?.startSeconds)||0,autoplay:true,muted:true});
  changeDisplay('video');
- setIssue('公式の通常埋め込みで再生を試行中',`${reason}。動画中央の再生ボタンを押してください。代替表示では自動同期・シークは使えません。`,'warning');
+ setIssue('公式の通常埋め込みで再生を試行中',`${reason}。ミュートで自動再生を試しています。始まらない場合は動画中央の赤い再生ボタンを押してください。代替表示では自動同期・シークは使えません。`,'warning');
  send('output-state',{videoId,status:'fallback-no-sync'});
  send('output-error',{message:'API接続不可：通常埋め込みへ切替（同期不可）'});
 }
@@ -43,6 +43,7 @@ function take(d){
  if(apiFailed){displayFallback('YouTube IFrame APIが使えません');return}
  if(!ready){
   // Keep this TAKE until onReady fires. Avoid displaying a misleading success state.
+  if(!restarting&&!playerInit)startPlayer();
   $('output-idle').querySelector('p').textContent='YouTubeプレーヤーの起動待ちです…';
   changeDisplay('idle');setIssue('プレーヤーを準備中','しばらくしても表示されない場合は通信・拡張機能を確認してください','warning');return;
  }
@@ -51,29 +52,35 @@ function take(d){
  catch(e){setIssue('動画の再生開始に失敗',String(e));send('output-error',{message:String(e)})}
 }
 async function startPlayer(){
- if(restarting)return;
- restarting=true;apiFailed=false;ready=false;fallback=false;player=null;
- if(lastTake?.videoId){setIssue('YouTubeプレーヤーを接続中','読み込み失敗時は通常の公式埋め込みへ切り替えます','warning')}
+ if(restarting||playerInit)return;
+ restarting=true;apiFailed=false;fallback=false;ready=false;
  try{
-  await buildPlayer('output-player','',{
-   muted:true,
-   onReady:p=>{player=p;ready=true;apiFailed=false;setIssue('');if(lastTake)take(lastTake)},
-   onError:e=>{
-    const msg=youtubeError(e.data);setIssue(`YouTube再生エラー ${e.data}`,msg+'。動画が埋め込み可能か確認してください。');send('output-error',{message:`${e.data}: ${msg}`});
-   },
-   onAutoplayBlocked:()=>{setIssue('自動再生が制限されています','「再生を許可」をクリックするかYouTubeプレーヤー内の再生ボタンを押してください','warning');send('output-error',{message:'自動再生がブロックされました'})}
+  await loadYT();
+  if(!lastTake?.videoId){setIssue('');return}
+  try{player?.destroy?.()}catch{}
+  player=null;
+  const target=lastTake.videoId;
+  setIssue('YouTubeプレーヤーを接続中','映像を準備しています。準備でき次第、最新のTAKEを適用します。','warning');
+  playerInit=buildPlayer('output-player',target,{
+    muted:true,
+    onError:e=>{const msg=youtubeError(e.data);setIssue('YouTube再生エラー '+e.data,msg);send('output-error',{message:e.data+': '+msg})},
+    onAutoplayBlocked:()=>{setIssue('自動再生が制限されています','プレーヤー内の再生ボタンをクリックしてください。','warning');send('output-error',{message:'自動再生がブロックされました'})}
   });
+  const p=await playerInit;
+  player=p;ready=true;playerInit=null;apiFailed=false;setIssue('');
+  if(lastTake)take(lastTake);
  }catch(err){
-  apiFailed=true;ready=false;
+  apiFailed=true;ready=false;playerInit=null;
   console.error('YouTube IFrame API bootstrap',err);
   if(lastTake?.videoId)displayFallback(`${err.code||'YT_INIT_ERROR'}: ${err.message}`);
-  else {
+  else{
    changeDisplay('idle');$('output-idle').querySelector('p').textContent='YouTubeプレーヤーの起動に失敗しました';
    setIssue(`YouTube API読込エラー [${err.code||'YT_INIT_ERROR'}]`,err.message+'。ブラウザの拡張機能を無効にして再試行してください。');
   }
   send('output-error',{message:`[${err.code||'YT_INIT_ERROR'}] ${err.message}`});
  }finally{restarting=false}
 }
+
 function handle(d){
  if(!d||typeof d!=='object')return;
  if(d.type==='take')take(d);
