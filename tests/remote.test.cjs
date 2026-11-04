@@ -26,3 +26,8 @@ test('Mac publishes state and iPad reads it with same session',async()=>{const p
 test('command queue preserves TAKE then SEEK and allows cursor',async()=>{const hello=await run(req('GET','hello'));assert.equal(hello.body.seq,0);const a=await run(req('POST','command',{type:'take',side:'right'}));const b=await run(req('POST','command',{type:'seek',delta:5}));assert.equal(a.body.seq,1);assert.equal(b.body.seq,2);const list=await run(req('GET','commands',null,'SHOW61',TOKEN,0));assert.deepEqual(list.body.commands.map(x=>x.command.type),['take','seek']);assert.equal(list.body.seq,2);const after=await run(req('GET','commands',null,'SHOW61',TOKEN,2));assert.equal(after.body.commands.length,0)});
 test('two sessions do not share commands or state',async()=>{const other=await run(req('GET','status',null,'OTHER6'));assert.equal(other.body.state,null);const otherHello=await run(req('GET','hello',null,'OTHER6'));assert.equal(otherHello.body.seq,0)});
 test('unfinished command never advances cursor and can be retried',async()=>{mem.set('autovj:remote:v61:STUCK6:seq','1');const result=await run(req('GET','commands',null,'STUCK6',TOKEN,0));assert.equal(result.body.seq,0);mem.set('autovj:remote:v61:STUCK6:cmd:1',JSON.stringify({seq:1,createdAt:Date.now(),command:{type:'arm',side:'left'}}));const retry=await run(req('GET','commands',null,'STUCK6',TOKEN,0));assert.equal(retry.body.commands[0].command.type,'arm');assert.equal(retry.body.seq,1)});
+
+test('iPadへ未取得の時刻を0秒と偽って渡さない',()=>{
+ const s=handler.cleanState({decks:{left:{title:'A',artist:'B',elapsed:null},right:{}}});
+ assert.equal(s.decks.left.elapsed,null);
+});

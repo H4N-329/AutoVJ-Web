@@ -39,3 +39,13 @@ test('Redisへ投稿し取得できる',async()=>{
   const get=res();await bridge({method:'GET',headers:{'x-autovj-token':token}},get);assert.equal(get.code,200);assert.equal(get.body.state.decks.left.title,'song');
  }finally{global.fetch=orig}
 });
+
+test('OCRが未取得なら経過時間を0秒に捏造しない',()=>{
+ const x=bridge.validate({decks:{left:{title:'曲',artist:'作者',elapsed:null,clockObservedAt:Date.now(),playing:'unknown'},right:{}}});
+ assert.equal(x.decks.left.elapsed,null);assert.equal(x.decks.left.clockObservedAt,0);
+});
+test('OCRの取得日時を通信日時から分離して保存する',()=>{
+ const measured=Date.now()-2500;
+ const x=bridge.validate({decks:{left:{title:'曲',artist:'作者',elapsed:99.3,clockObservedAt:measured,clockSource:'accurate-fallback',playing:'playing'},right:{}}});
+ assert.equal(x.decks.left.elapsed,99.3);assert.equal(x.decks.left.clockObservedAt,measured);assert.equal(x.decks.left.clockSource,'accurate-fallback');
+});

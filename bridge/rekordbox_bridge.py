@@ -65,52 +65,93 @@ def run():
     tracks=DeckStabilizer(required=2)
     motion=PlaybackDetector(advance_samples=2,pause_samples=2)
     lock=threading.RLock()
-    state={s:{'title':'','artist':'','elapsed':0,'playing':'unknown'} for s in ('left','right')}
+    state={s:{'title':'','artist':'','elapsed':None,'playing':'unknown',
+              'clockObservedAt':0,'clockRaw':'','clockSource':''} for s in ('left','right')}
     stopped=threading.Event()
+    def accept_clock(side, raw, observed_ms, observed_mono, source):
+        """Accept only parsed, in-order OCR samples for the currently known track.
+
+        Must be called under lock. Never fabricate a fresh timestamp when OCR fails.
+        """
+        track = tracks.tracks[side]
+        seconds = parse_elapsed(raw)
+        if not track or seconds is None or observed_ms <= state[side]['clockObservedAt']:
+            return False
+        ident = track_key(track)
+        motion.observe(side, ident, raw, observed_mono, confirmed=True)
+        state[side]['elapsed'] = seconds
+        state[side]['clockObservedAt'] = observed_ms
+        state[side]['clockRaw'] = str(raw)[:32]
+        state[side]['clockSource'] = source
+        raw_state = motion.status(side, time.monotonic())
+        state[side]['playing'] = ('playing' if raw_state == '再生中' else
+                                 'paused' if raw_state == '停止' else 'unknown')
+        return True
+
+    last_warning = {'left':0.0, 'right':0.0}
+    def report_missing(side, raw):
+        # Give actionable feedback without logging one warning for every frame.
+        now = time.monotonic()
+        if now-last_warning[side] < 12:
+            return
+        last_warning[side] = now
+        print(f'[時刻OCR] {side} は未取得（認識文字={raw!r}）。'
+              'DIAGNOSE_TIMERS.command で経過時間の読取枠を確認してください。', flush=True)
+
     def full():
         while not stopped.is_set():
+            observed_ms = int(time.time()*1000)
+            observed_mono = time.monotonic()
             try:
-                observed,elapsed=capture_and_read(reader,roi)
+                observed, elapsed = capture_and_read(reader,roi)
                 with lock:
                     tracks.update(observed)
                     for side in ('left','right'):
                         track=tracks.tracks[side]
-                        if track:
-                            ident=track_key(track)
-                            if (state[side]['title'],state[side]['artist'])!=(track['title'],track['artist']):
-                                state[side].update({'title':track['title'],'artist':track['artist'],'elapsed':0,'playing':'unknown'})
-                                motion.observe(side,ident,'',time.monotonic(),confirmed=False)
+                        if not track:continue
+                        if (state[side]['title'],state[side]['artist'])!=(track['title'],track['artist']):
+                            state[side].update({'title':track['title'],'artist':track['artist'],
+                                                'elapsed':None,'playing':'unknown',
+                                                'clockObservedAt':0,'clockRaw':'','clockSource':''})
+                            motion.observe(side,track_key(track),'',time.monotonic(),confirmed=False)
+                        # Reuse accurate timer OCR already read alongside the titles.
+                        accept_clock(side, elapsed.get(side,''),observed_ms,observed_mono,'full-accurate')
             except Exception as exc:
                 print('曲名OCRの問題:',str(exc)[:160],flush=True)
             stopped.wait(2)
+
     def fast():
         while not stopped.is_set():
+            observed_ms=int(time.time()*1000)
+            observed_mono=time.monotonic()
             try:
-                times=capture_elapsed_fast(reader,roi)
+                # Fast Vision OCR falls back to accurate mode for a failed timer.
+                values,sources=capture_elapsed_fast(reader,roi,return_sources=True)
                 with lock:
                     for side in ('left','right'):
-                        track=tracks.tracks[side]
-                        elapsed=parse_elapsed(times[side])
-                        if not track or elapsed is None:continue
-                        ident=track_key(track)
-                        motion.observe(side,ident,times[side],time.monotonic(),confirmed=True)
-                        state[side]['elapsed']=elapsed
-                        raw=motion.status(side,time.monotonic())
-                        state[side]['playing']='playing' if raw=='再生中' else 'paused' if raw=='停止' else 'unknown'
+                        if not tracks.tracks[side]:continue
+                        if not accept_clock(side,values.get(side,''),observed_ms,
+                                            observed_mono,sources.get(side,'fast')) and parse_elapsed(values.get(side,'')) is None:
+                            report_missing(side,values.get(side,''))
             except Exception as exc:
                 print('タイマーOCRの問題:',str(exc)[:160],flush=True)
-            stopped.wait(1.1)
+            stopped.wait(0.65)
     threads=[threading.Thread(target=full,daemon=True),threading.Thread(target=fast,daemon=True)]
     for t in threads:t.start()
     print('rekordbox監視開始。終了するには Ctrl+C を押してください。')
     print('rekordboxの画面は表示したままにしてください。v5.9のOCR校正を使います。')
+    print('経過時間が止まる場合は DIAGNOSE_TIMERS.command で読み取り領域を確認してください。')
     last=''
     try:
         while not stopped.is_set():
             with lock: snapshot=json.loads(json.dumps(state,ensure_ascii=False))
             try:
                 send(cfg['url'],cfg['token'],snapshot)
-                brief=' | '.join(f'{k}: {v["artist"]} - {v["title"]} {v["elapsed"]:.1f}s / {v["playing"]}' for k,v in snapshot.items())
+                brief=' | '.join(f'{k}: {v["artist"]} - {v["title"]} '
+                                 f'{v["elapsed"]:.1f}s ({v["clockSource"]}) / {v["playing"]}'
+                                 if v['elapsed'] is not None else
+                                 f'{k}: {v["artist"]} - {v["title"]} --:-- (OCR待機)'
+                                 for k,v in snapshot.items())
                 if brief!=last:print('送信:',brief,flush=True);last=brief
             except urllib.error.HTTPError as exc:
                 print(f'サーバーエラー: HTTP {exc.code} / Vercel設定とアクセストークンを確認',flush=True)

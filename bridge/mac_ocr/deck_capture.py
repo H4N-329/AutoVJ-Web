@@ -10,6 +10,7 @@ import tempfile
 from pathlib import Path
 from PIL import Image
 from track_bridge import DATA_DIR, track_key
+from playback_detector import parse_elapsed
 
 CONFIG = DATA_DIR / 'deck_capture_config.json'  # same file as v5; safe migration
 FIELDS = ('left_title', 'left_artist', 'right_title', 'right_artist', 'left_elapsed', 'right_elapsed')
@@ -152,10 +153,26 @@ class DeckStabilizer:
         return changed
 
 
-def capture_elapsed_fast(ocr, cfg):
-    """Dedicated timer-only, speed-first OCR. One capture, two short timer ROIs."""
+def capture_elapsed_fast(ocr, cfg, *, return_sources=False):
+    """Recognize both deck timers, retrying bad fast reads with accurate OCR.
+
+    Fast Vision OCR can fail on very small thin font clock labels. The same
+    screenshot is used for retry so that timing is not skewed by re-capture.
+    """
     shot = screenshot(cfg['display'])
-    crops = [shot.crop(roi_box(cfg['rois'][name], shot.size))
-             for name in ('left_elapsed', 'right_elapsed')]
-    values = ocr.recognize(crops, fast=True)
-    return {'left': values[0], 'right': values[1]}
+    sides = ('left', 'right')
+    crops = [shot.crop(roi_box(cfg['rois'][f'{side}_elapsed'],shot.size))
+             for side in sides]
+    raw_fast = ocr.recognize(crops,fast=True)
+    values = dict(zip(sides,raw_fast))
+    sources = {side:'fast' for side in sides}
+    missing = [side for side in sides if parse_elapsed(values[side]) is None]
+    if missing:
+        accurate = ocr.recognize([crops[sides.index(side)] for side in missing],fast=False)
+        for side, result in zip(missing,accurate):
+            if parse_elapsed(result) is not None:
+                values[side] = result
+                sources[side] = 'accurate-fallback'
+            else:
+                sources[side] = 'unreadable'
+    return (values,sources) if return_sources else values

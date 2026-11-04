@@ -81,3 +81,13 @@ python3 -m compileall -q bridge
 UIのみ確認する場合は `python3 -m http.server 8000` で表示できます。ただし、**リモート連携とYouTube検索はVercelのAPIおよび環境変数を設定しないと動きません。** 本番のrekordbox/Mac/iPad/HDMI/YouTube再生を使った統合試験は未実施です。
 
 **YouTube利用上の注意:** 本アプリは公式IFrame APIを使用し、YouTube動画を保存・ダウンロードしません。埋め込み・自動再生が禁止された動画は再生できません。イベント会場での上映には、YouTubeの利用規約と必要な権利・利用許諾を別途確認してください。
+
+## v6.1.2（rekordbox経過時間の更新修正）
+
+- Apple Vision高速OCRでタイマーが読めないとき、高精度モードへフォールバック。
+- 曲名OCRと同時に読み取ったタイマーも再利用。
+- Mac側でOCR実測時刻 `clockObservedAt` を送信し、Web側で通信受信時刻と区別。
+- OCR未取得時は `--:--` と表示。自動同期は時刻取得まで保留。
+- `bridge/DIAGNOSE_TIMERS.command` で左右のタイマー切り抜きと認識文字を確認可能。
+
+更新手順は [CLOCK_FIX_GUIDE_JA.md](CLOCK_FIX_GUIDE_JA.md) を参照してください。
