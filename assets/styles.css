@@ -2,3 +2,9 @@
 
 /* v6.1 Mac remote panel */
 .remote-panel{margin:0 0 15px;padding:12px 15px}.remote-panel-main{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}.remote-panel strong{font-size:13px}.remote-state{margin-left:13px;color:#a0b1c4;font-size:11px}.remote-state.ready{color:#54e1ae}.remote-toggle{display:flex;align-items:center;gap:7px;color:#d6e5f5;font-size:12px}.remote-toggle input{accent-color:#238ee4}.remote-code{display:flex;align-items:center;gap:9px}.remote-code span{color:#9cabc0;font-size:11px}.remote-code strong{font-size:19px;letter-spacing:2px;color:#9cdbff}.remote-panel details{border-top:1px solid #2c3747;margin-top:10px;padding-top:10px}.remote-panel summary{cursor:pointer;color:#89bbdf;font-size:12px}.remote-panel details .row-gap{margin-top:10px}.remote-panel details input{flex:1;min-width:190px;font-size:12px}.remote-panel details p{margin:10px 0 4px}
+
+/* v6.1.4 — keep API-created iframe inside a stable CSS layout host. */
+.preview-diagnostic{margin:10px 14px 0;color:#95b6cf;font-size:12px;min-height:18px;line-height:1.45}
+.mv-select-btn{border:1px solid #40516b;background:#19283a;color:#a6d5ff;border-radius:6px;padding:8px 9px;width:100%;font-size:11px;font-weight:700;cursor:pointer;text-align:center;margin:0 0 9px}
+.mv-select-btn:hover,.mv-select-btn:focus-visible{background:#254463;color:#fff}
+.video-player>iframe,.output-player>iframe,.mini-player>iframe{width:100%!important;height:100%!important;border:0}

@@ -11,23 +11,52 @@ export const fmt=(n)=>Number.isFinite(n)&&n>=0?`${String(Math.floor(n/60)).padSt
 export const keyOf=(t)=>[t?.artist,t?.title].map(v=>String(v||'').normalize('NFKC').toLocaleLowerCase().replace(/[^\p{L}\p{N}]/gu,'')).join('::');
 export const profileId=(deck)=>`${keyOf(deck)}|${deck.videoId}`;
 export const clamp=(v,min,max)=>Math.min(max,Math.max(min,Number(v)||0));
-export function loadYT(){if(window.YT?.Player)return Promise.resolve(window.YT);if(window.__ytPromise)return window.__ytPromise;window.__ytPromise=new Promise((resolve,reject)=>{const s=document.createElement('script');s.src='https://www.youtube.com/iframe_api';s.async=true;s.onerror=()=>reject(Error('YouTubeプレーヤーの読込に失敗'));window.onYouTubeIframeAPIReady=()=>resolve(window.YT);document.head.append(s)});return window.__ytPromise}
-export function buildPlayer(host, videoId='', {muted=true,onReady,onStateChange}={}) {
-  return loadYT().then(YT => new Promise(resolve => {
-    const player = new YT.Player(host, {
-      videoId: VIDEO_RE.test(videoId) ? videoId : undefined,
-      width: '100%', height: '100%',
-      playerVars: {playsinline:1, rel:0, controls:1, origin:location.origin},
-      events: {
-        onReady: event => {
-          if (muted) event.target.mute();
-          onReady?.(event.target);
-          resolve(event.target);
-        },
-        onStateChange: event => onStateChange?.(event)
-      }
-    });
-    void player;
+export function loadYT(){
+ if(window.YT?.Player)return Promise.resolve(window.YT);
+ if(window.__ytPromise)return window.__ytPromise;
+ window.__ytPromise=new Promise((resolve,reject)=>{
+  const s=document.createElement('script');
+  let finished=false;
+  const timer=setTimeout(()=>finish(false,Error('YouTubeプレーヤーの読込がタイムアウトしました。ネット接続・広告ブロッカーを確認してください')),20000);
+  function finish(success,value){
+   if(finished)return;
+   finished=true;clearTimeout(timer);
+   if(success)resolve(value);else reject(value);
+  }
+  s.src='https://www.youtube.com/iframe_api';s.async=true;
+  s.onerror=()=>finish(false,Error('YouTubeプレーヤーの読込に失敗しました'));
+  window.onYouTubeIframeAPIReady=()=>finish(true,window.YT);
+  document.head.append(s);
+ });
+ return window.__ytPromise;
+}
+// Keep the visible layout host in the DOM. The YouTube API REPLACES its target
+// with an iframe; passing the layout host directly destroys its CSS classes.
+export function buildPlayer(host, videoId='', {muted=true,onReady,onStateChange,onError,onAutoplayBlocked}={}) {
+  const root=document.getElementById(host);
+  if(!root)return Promise.reject(Error('プレーヤー領域が見つかりません: '+host));
+  const target=document.createElement('div');
+  target.id=host+'-yt-target';
+  target.style.width='100%';
+  target.style.height='100%';
+  root.replaceChildren(target);
+  return loadYT().then(YT=>new Promise((resolve,reject)=>{
+    try {
+      new YT.Player(target,{
+        videoId:VIDEO_RE.test(videoId)?videoId:undefined,
+        width:'100%',height:'100%',
+        playerVars:{playsinline:1,rel:0,controls:1,origin:location.origin},
+        events:{
+          onReady:event=>{
+            try {if(muted)event.target.mute();onReady?.(event.target)} catch(err){console.warn(err)}
+            resolve(event.target);
+          },
+          onStateChange:event=>onStateChange?.(event),
+          onError:event=>onError?.(event),
+          onAutoplayBlocked:event=>onAutoplayBlocked?.(event)
+        }
+      });
+    }catch(err){reject(err)}
   }));
 }
 export function openChannel(onMessage){const channel=typeof BroadcastChannel==='function'?new BroadcastChannel(CHANNEL):null;if(channel)channel.onmessage=e=>onMessage(e.data);else window.addEventListener('storage',e=>{if(e.key===CHANNEL&&e.newValue){try{onMessage(JSON.parse(e.newValue))}catch{}}});return{send(data){const payload={...data,ts:Date.now()};if(channel)channel.postMessage(payload);else localStorage.setItem(CHANNEL,JSON.stringify(payload))},close(){channel?.close()}}}
