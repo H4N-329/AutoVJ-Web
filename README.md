@@ -1,4 +1,6 @@
-# AutoVJ Web v6.1 — MacでDJ / iPadでVJ操作
+> **v6.1.1修正:** Mac側の「設定」「MV検索」タブが反応しない問題を修正しました。すでに公開済みの場合は `FIX_NOTES_JA.md` に従い、`assets/app.js` だけを更新できます。
+
+# AutoVJ Web v6.1.1 — MacでDJ / iPadでVJ操作
 
 v6.0をベースに、**Mac側のDJ LIVEと出力ウィンドウをそのまま利用し、iPadからTAKEや映像補正を遠隔操作**する機能を追加しました。
 
