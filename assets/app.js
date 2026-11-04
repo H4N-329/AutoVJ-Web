@@ -1,12 +1,12 @@
 import {createRemoteHost} from './remote-host.js';
-import {CHANNEL,STORE,PREFS,SIDES,emptyDeck,loadJSON,saveJSON,videoIdOf,fmt,keyOf,profileId,clamp,buildPlayer,openChannel,renderGenerative} from './shared.js';
+import {CHANNEL,STORE,PREFS,SIDES,emptyDeck,loadJSON,saveJSON,videoIdOf,fmt,keyOf,profileId,clamp,buildPlayer,openChannel,renderGenerative,plainYoutubeEmbed,youtubeError} from './shared.js';
 const $=id=>document.getElementById(id);
 const DEFAULTS={lead:.5,tolerance:.8,overlay:true,autoSearch:true,autoAdopt:false,accessToken:'',bridge:false,autoSync:true,mode:'off'};
 let settings={...DEFAULTS,...loadJSON(PREFS,{})};let persisted=loadJSON(STORE,{});
 let decks={left:emptyDeck(),right:emptyDeck()};let mappings=persisted.mappings||{},offsets=persisted.offsets||{};
-let selected='left',active=null,armed=null,outputLast=0,telemetry=null,lastSync=0,initialAligned=false,searches=0,searchBusy={},bridgeLast=0,modeBlockUntil=0;
+let selected='left',active=null,armed=null,outputLast=0,outputFallback=false,telemetry=null,lastSync=0,initialAligned=false,searches=0,searchBusy={},bridgeLast=0,modeBlockUntil=0;
 let preview=null,cues={left:null,right:null},stopGen=null,seen={left:'',right:''},playObserver={left:null,right:null};let lastManualAt=0;
-let previewLoad='loading',previewError='',previewActiveId='',cueErrors={left:'',right:''};
+let previewLoad='loading',previewError='',previewActiveId='',cueErrors={left:'',right:''},youtubeApiFailed=false;
 const channel=openChannel(onChannel);
 const toast=s=>{$('toast').textContent=s};
 const persist=()=>saveJSON(STORE,{mappings,offsets});
@@ -22,12 +22,13 @@ function previewMessage(){
  if(!d.videoId){
    el.textContent='DECK '+(active==='left'?'1':'2')+'：MV未選択。映像生成を表示しています。MV検索・管理から候補を採用してください。';
  }else if(previewError){el.textContent='YouTubeプレビュー：'+previewError+'（ほかの公式MV候補を試してください）';}
+ else if(previewLoad==='fallback'){el.textContent='公式の通常埋め込みで表示中（API未接続）。プレビュー内の再生ボタンを押してください。秒数同期は利用できません。';}
  else if(!preview){el.textContent='YouTubeプレーヤーを準備中。TAKEした曲は準備完了後に再生します。';}
  else if(previewLoad==='playing'){el.textContent='MVプレビュー再生中（ミュート）。上映映像は別ウィンドウです。';}
  else if(previewLoad==='blocked'){el.textContent='ブラウザが自動再生をブロックしました。MVプレーヤーの再生ボタンを押してください。';}
  else {el.textContent='MVプレビュー読み込み中。再生が始まらない場合はYouTube側の埋め込み制限も確認してください。';}
 }
-function renderSync(){if(!active){$('dj-time').textContent='--:--';$('mv-time').textContent='--:--';$('drift-value').textContent='未計測';return}const d=decks[active],expected=targetTime(d);$('dj-time').textContent=d.title?fmt(timeNow(d)):'--:--';const live=telemetry&&telemetry.videoId===d.videoId&&Date.now()-telemetry.ts<3000;$('mv-time').textContent=live?fmt(telemetry.time):'--:--';$('drift-value').textContent=live&&Number.isFinite(d.elapsed)?`${(expected-telemetry.time)>=0?'+':''}${(expected-telemetry.time).toFixed(1)}秒`:'未計測';if(!Number.isFinite(d.elapsed)||!d.observedAt)$('sync-status').textContent='rekordbox経過時間のOCR待機中：Macでタイマー診断を実行';else if(!live)$('sync-status').textContent='映像出力の再生時刻を待機中';else if(d.playing==='unknown')$('sync-status').textContent='デッキ再生状態が不明：自動同期は保留';else $('sync-status').textContent=settings.autoSync?'同期中 / 基準 '+deckName(active):'自動同期 OFF'}
+function renderSync(){if(!active){$('dj-time').textContent='--:--';$('mv-time').textContent='--:--';$('drift-value').textContent='未計測';return}const d=decks[active],expected=targetTime(d);$('dj-time').textContent=d.title?fmt(timeNow(d)):'--:--';const live=telemetry&&telemetry.videoId===d.videoId&&Date.now()-telemetry.ts<3000;$('mv-time').textContent=live?fmt(telemetry.time):'--:--';$('drift-value').textContent=live&&Number.isFinite(d.elapsed)?`${(expected-telemetry.time)>=0?'+':''}${(expected-telemetry.time).toFixed(1)}秒`:'未計測';if(!Number.isFinite(d.elapsed)||!d.observedAt)$('sync-status').textContent='rekordbox経過時間のOCR待機中：Macでタイマー診断を実行';else if(outputFallback)$('sync-status').textContent='YouTube通常埋め込み中：API未接続のため自動同期は利用できません';else if(!live)$('sync-status').textContent='映像出力の再生時刻を待機中';else if(d.playing==='unknown')$('sync-status').textContent='デッキ再生状態が不明：自動同期は保留';else $('sync-status').textContent=settings.autoSync?'同期中 / 基準 '+deckName(active):'自動同期 OFF'}
 function targetTime(d){const elapsed=timeNow(d);return Math.max(0,(Number.isFinite(elapsed)?elapsed:0)+settings.lead+(Number(offsets[profileId(d)])||0))}
 function sendConfig(){channel.send({type:'config',overlay:settings.overlay})}
 function saveSettings(){saveJSON(PREFS,settings);$('lead-value').textContent=(settings.lead>=0?'+':'')+settings.lead.toFixed(1)+'秒';sendConfig()}
@@ -40,7 +41,7 @@ async function initPlayers(){
     },
     onError:e=>{
       const code=Number(e.data);
-      previewError=([100,101,150].includes(code)?'この動画は埋め込み再生ができません（エラー '+code+'）':'動画再生エラー '+code);
+      previewError=youtubeError(code)+'（エラー '+code+'）';
       previewMessage();
     },
     onAutoplayBlocked:()=>{previewLoad='blocked';previewMessage()}
@@ -50,7 +51,9 @@ async function initPlayers(){
   if(active)showPreview(decks[active]);
   previewMessage();
  }catch(err){
-  previewError='プレーヤー初期化失敗: '+err.message;
+  youtubeApiFailed=true;
+  previewError='プレーヤー初期化失敗 ['+(err.code||'YT_INIT_ERROR')+']: '+err.message;
+  if(active&&decks[active].videoId)showPreview(decks[active]);
   previewMessage();
   toast('YouTubeプレーヤーを読み込めません: '+err.message);
  }
@@ -63,7 +66,7 @@ async function initPlayers(){
     onAutoplayBlocked:()=>{cueErrors[side]='再生制限';render()}
    });
    if(decks[side].videoId)cues[side].cueVideoById(decks[side].videoId);
-  }catch(err){cueErrors[side]='頭出し不可';console.warn('Cue player '+side,err)}
+  }catch(err){cueErrors[side]='APIに接続できません（通常埋め込み）';if(decks[side].videoId)plainYoutubeEmbed('cue-'+side,decks[side].videoId,{autoplay:false});console.warn('Cue player '+side,err)}
   render();
  }));
 } 
@@ -80,16 +83,17 @@ function showPreview(d){
  }
  if(stopGen){stopGen();stopGen=null}
  previewActiveId=d.videoId;previewError='';previewLoad='loading';
+ if(youtubeApiFailed&&!preview){plainYoutubeEmbed('main-player',d.videoId,{startSeconds:targetTime(d),autoplay:false});previewLoad='fallback';previewMessage();return}
  try{if(preview){preview.loadVideoById({videoId:d.videoId,startSeconds:targetTime(d)});preview.mute()}}
  catch(e){previewError=String(e);console.warn(e)}
  previewMessage();
 }
 function take(side,why='手動'){const d=decks[side];if(!d.title){toast(deckName(side)+' の曲名がありません。「MV検索・管理」で登録してください。');return}active=side;armed=null;initialAligned=false;telemetry=null;lastSync=Date.now();modeBlockUntil=Date.now()+12000;showPreview(d);channel.send({type:'take',deck:side,title:d.title,artist:d.artist,videoId:d.videoId,startSeconds:targetTime(d)});sendConfig();toast(`${deckName(side)} TAKE (${why}) / ${d.artist} - ${d.title}`);render()}
-function onChannel(d){if(!d)return;if(d.type==='output-ready'){outputLast=Date.now();sendConfig();if(active){const x=decks[active];channel.send({type:'take',deck:active,title:x.title,artist:x.artist,videoId:x.videoId,startSeconds:targetTime(x)})}}else if(d.type==='output-heartbeat'||d.type==='output-state'){outputLast=Date.now()}else if(d.type==='output-closed'){outputLast=0}else if(d.type==='telemetry'){outputLast=Date.now();telemetry={...d,ts:Date.now()}}else if(d.type==='output-error')toast('出力エラー: '+d.message)}
+function onChannel(d){if(!d)return;if(d.type==='output-ready'){outputLast=Date.now();sendConfig();if(active){const x=decks[active];channel.send({type:'take',deck:active,title:x.title,artist:x.artist,videoId:x.videoId,startSeconds:targetTime(x)})}}else if(d.type==='output-heartbeat'||d.type==='output-state'){outputLast=Date.now();if(d.type==='output-state')outputFallback=d.status==='fallback-no-sync'}else if(d.type==='output-closed'){outputLast=0}else if(d.type==='telemetry'){outputLast=Date.now();telemetry={...d,ts:Date.now()}}else if(d.type==='output-error'){toast('プロジェクター出力: '+d.message);const s=$('output-status');s.textContent='YouTubeエラー: '+d.message;s.title=d.message}}
 function seek(delta){if(!active)return toast('先にTAKEしてください');const d=decks[active];if(!d.videoId)return toast('自動生成映像には再生位置がありません');channel.send({type:'seek',videoId:d.videoId,delta:Number(delta)});try{preview?.seekTo(Math.max(0,preview.getCurrentTime()+Number(delta)),true)}catch{};toast('MVを'+(delta>0?'+'+delta:delta)+'秒補正')}
-function sync(force=false){if(!active)return;const d=decks[active];if(!d.videoId||!d.title)return;const clockFresh=Number.isFinite(d.elapsed)&&d.observedAt>0&&Date.now()-d.observedAt<8000;if(!force&&(!settings.autoSync||d.playing!=='playing'||!clockFresh))return;const valid=telemetry&&telemetry.videoId===d.videoId&&Date.now()-telemetry.ts<3000;if(!valid)return;if(!force&&Date.now()-lastSync<3500)return;const drift=targetTime(d)-telemetry.time;const threshold=settings.tolerance;if(!force&&Math.abs(drift)<threshold)return;const max=initialAligned?5:300;if(!force&&Math.abs(drift)>max){$('sync-status').textContent=`補正を保留（ズレ ${drift.toFixed(1)}秒）`;return}const target=targetTime(d);channel.send({type:'seek',videoId:d.videoId,absolute:target});try{preview?.seekTo(target,true)}catch{};lastSync=Date.now();initialAligned=true;toast(`TIMELINE SYNC: 映像を ${fmt(target)} に合わせました`)}
+function sync(force=false){if(!active)return;const d=decks[active];if(!d.videoId||!d.title)return;const clockFresh=Number.isFinite(d.elapsed)&&d.observedAt>0&&Date.now()-d.observedAt<8000;if(outputFallback)return;if(!force&&(!settings.autoSync||d.playing!=='playing'||!clockFresh))return;const valid=telemetry&&telemetry.videoId===d.videoId&&Date.now()-telemetry.ts<3000;if(!valid)return;if(!force&&Date.now()-lastSync<3500)return;const drift=targetTime(d)-telemetry.time;const threshold=settings.tolerance;if(!force&&Math.abs(drift)<threshold)return;const max=initialAligned?5:300;if(!force&&Math.abs(drift)>max){$('sync-status').textContent=`補正を保留（ズレ ${drift.toFixed(1)}秒）`;return}const target=targetTime(d);channel.send({type:'seek',videoId:d.videoId,absolute:target});try{preview?.seekTo(target,true)}catch{};lastSync=Date.now();initialAligned=true;toast(`TIMELINE SYNC: 映像を ${fmt(target)} に合わせました`)}
 function applyTrack(side,title,artist,{elapsed=0,playing='unknown',observedAt=Date.now(),videoId}={}){if(!title.trim()||!artist.trim())return;const prev=decks[side];const changed=keyOf(prev)!==keyOf({title,artist});const next={...prev,title:title.trim().slice(0,180),artist:artist.trim().slice(0,180),elapsed,playing,observedAt};if(changed){next.videoId='';next.videoTitle='';next.videoStatus='MV未検索';const remembered=mappings[keyOf(next)];if(remembered?.video_id){next.videoId=remembered.video_id;next.videoStatus='記憶済み';next.videoTitle=remembered.title||''}seen[side]=keyOf(next)}if(videoId)next.videoId=videoId;decks[side]=next;if(changed||videoId)cue(side);render();if(changed&&settings.autoSearch&&!next.videoId)searchTrack(side,true)}
-function cue(side){const d=decks[side];if(d.videoId){try{cues[side]?.cueVideoById(d.videoId)}catch{}}}
+function cue(side){const d=decks[side];if(d.videoId){try{if(cues[side])cues[side].cueVideoById(d.videoId);else if(youtubeApiFailed)plainYoutubeEmbed('cue-'+side,d.videoId,{autoplay:false})}catch{}}}
 function openSearch(side){selected=side;switchTab('search');if(!decks[side].videoId)toast(deckName(side)+' のMV候補を選択してください。')}
 function chooseVideo(side,id,meta={}){if(!id)return;const d=decks[side];if(!d.title||!d.artist)return toast('デッキに楽曲情報を入力してください');d.videoId=id;d.videoTitle=meta.title||'';d.videoStatus='準備済み';mappings[keyOf(d)]={video_id:id,choice:meta.choice||'manual',title:d.videoTitle};persist();cue(side);if(active===side){showPreview(d);channel.send({type:'take',deck:side,title:d.title,artist:d.artist,videoId:d.videoId,startSeconds:targetTime(d)});sendConfig()}render();toast(`${deckName(side)} にMVを保存しました。${active===side?'プレビューと出力を更新しました。':'TAKEで出力できます。'}`)}
 async function searchTrack(side,automatic=false){const d=decks[side];if(!d.title||!d.artist)return;if(searchBusy[side])return;if(automatic&&searches>=12){d.videoStatus='検索上限に到達';render();return}if(!automatic){selected=side;$('search-deck').value=side;$('search-title').value=d.title;$('search-artist').value=d.artist}d.videoStatus='検索中…';render();searchBusy[side]=true;searches++;try{const r=await fetch('/api/youtube-search',{method:'POST',headers:{'Content-Type':'application/json','X-AutoVJ-Token':settings.accessToken||''},body:JSON.stringify({title:d.title,artist:d.artist})});const data=await r.json();if(!r.ok)throw Error(data.error||'検索失敗');if(keyOf(d)!==keyOf(decks[side]))return;d.videoStatus=`MV候補 ${data.items.length}件`;if(settings.autoAdopt&&data.items[0]&&data.items[0].score>=100&&!d.videoId)chooseVideo(side,data.items[0].id,{...data.items[0],choice:'auto'});if(!automatic||document.querySelector('#tab-search.active'))showResults(data.items,side);if(automatic&&data.items.length&&!d.videoId){d.videoStatus='候補あり（「MV検索・管理」で選択）';resultsPerDeck[side]=data.items}}catch(err){d.videoStatus='検索エラー';if(!automatic)showResults([],side,err.message);else toast(`MV自動検索: ${err.message}`)}finally{searchBusy[side]=false;render()}}

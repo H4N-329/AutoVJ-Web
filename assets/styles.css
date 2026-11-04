@@ -8,3 +8,19 @@
 .mv-select-btn{border:1px solid #40516b;background:#19283a;color:#a6d5ff;border-radius:6px;padding:8px 9px;width:100%;font-size:11px;font-weight:700;cursor:pointer;text-align:center;margin:0 0 9px}
 .mv-select-btn:hover,.mv-select-btn:focus-visible{background:#254463;color:#fff}
 .video-player>iframe,.output-player>iframe,.mini-player>iframe{width:100%!important;height:100%!important;border:0}
+
+/* v6.1.5: actionable diagnostics without obscuring the YouTube video controls. */
+[hidden]{display:none!important}
+.output-diagnostic{position:absolute;left:18px;bottom:72px;z-index:10;max-width:min(640px,calc(100vw - 36px));background:rgba(14,23,36,.95);border:1px solid #56728d;border-radius:9px;color:#ecf3fb;padding:14px 16px;font-size:13px;box-shadow:0 8px 34px #0009}
+.output-diagnostic[data-kind="warning"]{border-color:#9c7440}
+.output-diagnostic strong{font-size:14px;color:#b8dfff}
+.output-diagnostic p{margin:7px 0 12px;line-height:1.55;color:#cfdaeb}
+.output-diagnostic-actions{display:flex;flex-wrap:wrap;align-items:center;gap:14px}
+.output-diagnostic-actions a{color:#9acfff;font-size:13px}
+.output-menu{opacity:.52}
+
+/* Reserve a separate status strip; do not cover YouTube's video or controls. */
+.output-diagnostic{left:0;right:0;bottom:0;max-width:none;min-height:145px;box-shadow:none;border-radius:0;border-left:0;border-right:0;border-bottom:0;padding:13px 20px}
+.output-page.has-output-diagnostic .output-player,.output-page.has-output-diagnostic .output-generative{height:calc(100vh - 62px - 155px)}
+.output-page.has-output-diagnostic .output-overlay.hidden~.output-player,.output-page.has-output-diagnostic .output-overlay.hidden~.output-generative{height:calc(100vh - 155px)}
+.output-page.has-output-diagnostic .output-menu{bottom:160px;opacity:.6}

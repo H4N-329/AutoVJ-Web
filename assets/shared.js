@@ -11,24 +11,62 @@ export const fmt=(n)=>Number.isFinite(n)&&n>=0?`${String(Math.floor(n/60)).padSt
 export const keyOf=(t)=>[t?.artist,t?.title].map(v=>String(v||'').normalize('NFKC').toLocaleLowerCase().replace(/[^\p{L}\p{N}]/gu,'')).join('::');
 export const profileId=(deck)=>`${keyOf(deck)}|${deck.videoId}`;
 export const clamp=(v,min,max)=>Math.min(max,Math.max(min,Number(v)||0));
+// IFrame API bootstrap with explicit failures, retry and a second readiness signal.
+// Some browser extensions block iframe_api; no YouTube API key is involved here.
+export function youtubeError(code){
+ const n=Number(code);
+ return ({2:'動画IDが無効です',5:'HTML5プレーヤーで再生できません',100:'動画が削除・非公開の可能性があります',101:'投稿者が埋め込み再生を許可していません',150:'投稿者が埋め込み再生を許可していません',153:'YouTubeが埋め込み元を確認できません（Referer/ブラウザの制限）'})[n]||('YouTubeエラー '+code);
+}
 export function loadYT(){
  if(window.YT?.Player)return Promise.resolve(window.YT);
  if(window.__ytPromise)return window.__ytPromise;
- window.__ytPromise=new Promise((resolve,reject)=>{
-  const s=document.createElement('script');
+ let created=null;
+ const promise=new Promise((resolve,reject)=>{
   let finished=false;
-  const timer=setTimeout(()=>finish(false,Error('YouTubeプレーヤーの読込がタイムアウトしました。ネット接続・広告ブロッカーを確認してください')),20000);
-  function finish(success,value){
+  const done=(ok,detail)=>{
    if(finished)return;
-   finished=true;clearTimeout(timer);
-   if(success)resolve(value);else reject(value);
-  }
-  s.src='https://www.youtube.com/iframe_api';s.async=true;
-  s.onerror=()=>finish(false,Error('YouTubeプレーヤーの読込に失敗しました'));
-  window.onYouTubeIframeAPIReady=()=>finish(true,window.YT);
-  document.head.append(s);
+   finished=true;
+   clearInterval(poll);clearTimeout(timer);
+   if(ok)resolve(detail);else reject(detail);
+  };
+  const check=()=>{if(window.YT?.Player)done(true,window.YT)};
+  const poll=setInterval(check,200);
+  const timer=setTimeout(()=>done(false,Object.assign(Error('YouTube IFrame APIの応答が12秒以内にありません（通信・拡張機能・ネットワーク制限を確認）'),{code:'YT_API_TIMEOUT'})),12000);
+  // If another script already initialized the API, the poll above will detect it.
+  const previous=window.onYouTubeIframeAPIReady;
+  window.onYouTubeIframeAPIReady=()=>{
+   try{if(typeof previous==='function')previous()}catch(err){console.warn('other YouTube callback',err)}
+   check();
+  };
+  created=document.createElement('script');created.src='https://www.youtube.com/iframe_api';created.async=true;
+  created.onerror=()=>done(false,Object.assign(Error('YouTube IFrame APIのスクリプトがネットワークまたは拡張機能によりブロックされました'),{code:'YT_SCRIPT_ERROR'}));
+  document.head.append(created);
+  check();
+ });
+ window.__ytPromise=promise.catch(err=>{
+  // Do not permanently cache rejection: a retry may work after browser settings change.
+  window.__ytPromise=null;
+  created?.remove();
+  throw err;
  });
  return window.__ytPromise;
+}
+// Official YouTube iframe is a *fallback only*. It has no reliable seek/clock telemetry.
+// Do not claim sync or pre-buffer completion while it is active.
+export function plainYoutubeEmbed(host,videoId,{startSeconds=0,autoplay=false,muted=true}={}){
+ const root=document.getElementById(host);
+ if(!root||!VIDEO_RE.test(String(videoId||'')))return null;
+ const f=document.createElement('iframe');
+ const p=new URLSearchParams({playsinline:'1',controls:'1',rel:'0',origin:location.origin,autoplay:autoplay?'1':'0',mute:muted?'1':'0'});
+ const start=Math.max(0,Math.floor(Number(startSeconds)||0));if(start)p.set('start',String(start));
+ f.src=`https://www.youtube.com/embed/${videoId}?${p.toString()}`;
+ f.setAttribute('allow','autoplay; encrypted-media; picture-in-picture; fullscreen');
+ f.setAttribute('allowfullscreen','');
+ f.setAttribute('referrerpolicy','strict-origin-when-cross-origin');
+ f.title='YouTube公式埋め込み（API未接続・同期不可）';
+ f.style.width='100%';f.style.height='100%';f.style.border='0';
+ root.replaceChildren(f);
+ return f;
 }
 // Keep the visible layout host in the DOM. The YouTube API REPLACES its target
 // with an iframe; passing the layout host directly destroys its CSS classes.
@@ -41,13 +79,22 @@ export function buildPlayer(host, videoId='', {muted=true,onReady,onStateChange,
   target.style.height='100%';
   root.replaceChildren(target);
   return loadYT().then(YT=>new Promise((resolve,reject)=>{
+    let instance=null,settled=false;
+    const timer=setTimeout(()=>{
+      if(settled)return;
+      settled=true;
+      try{instance?.destroy?.()}catch{}
+      reject(Object.assign(Error('YouTubeのiframeが準備完了を通知しません（ブラウザのコンテンツ制限・ネットワークを確認）'),{code:'YT_PLAYER_READY_TIMEOUT'}));
+    },12000);
     try {
-      new YT.Player(target,{
+      instance=new YT.Player(target,{
         videoId:VIDEO_RE.test(videoId)?videoId:undefined,
         width:'100%',height:'100%',
         playerVars:{playsinline:1,rel:0,controls:1,origin:location.origin},
         events:{
           onReady:event=>{
+            if(settled)return;
+            settled=true;clearTimeout(timer);
             try {if(muted)event.target.mute();onReady?.(event.target)} catch(err){console.warn(err)}
             resolve(event.target);
           },
@@ -56,7 +103,7 @@ export function buildPlayer(host, videoId='', {muted=true,onReady,onStateChange,
           onAutoplayBlocked:event=>onAutoplayBlocked?.(event)
         }
       });
-    }catch(err){reject(err)}
+    }catch(err){clearTimeout(timer);settled=true;reject(err)}
   }));
 }
 export function openChannel(onMessage){const channel=typeof BroadcastChannel==='function'?new BroadcastChannel(CHANNEL):null;if(channel)channel.onmessage=e=>onMessage(e.data);else window.addEventListener('storage',e=>{if(e.key===CHANNEL&&e.newValue){try{onMessage(JSON.parse(e.newValue))}catch{}}});return{send(data){const payload={...data,ts:Date.now()};if(channel)channel.postMessage(payload);else localStorage.setItem(CHANNEL,JSON.stringify(payload))},close(){channel?.close()}}}
