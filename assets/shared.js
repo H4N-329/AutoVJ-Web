@@ -3,13 +3,13 @@ export const STORE='autovj-web-v6-state';
 export const PREFS='autovj-web-v6-settings';
 export const SIDES=['left','right'];
 export const VIDEO_RE=/^[\w-]{11}$/;
-export const emptyDeck=()=>({title:'',artist:'',elapsed:0,playing:'unknown',videoId:'',videoTitle:'',videoStatus:'未設定',observedAt:0});
+export const emptyDeck=()=>({title:'',artist:'',elapsed:0,playing:'unknown',videoId:'',localId:'',localName:'',videoTitle:'',videoStatus:'未設定',observedAt:0});
 export const loadJSON=(key,fallback)=>{try{return JSON.parse(localStorage.getItem(key))??fallback}catch{return fallback}};
 export const saveJSON=(key,val)=>{try{localStorage.setItem(key,JSON.stringify(val))}catch(e){console.warn('保存できません',e)}};
 export function videoIdOf(input){try{const s=String(input||'').trim();if(VIDEO_RE.test(s))return s;const url=new URL(s);const domain=url.hostname.toLowerCase().replace(/^www\./,'');let id='';if(domain==='youtu.be')id=url.pathname.split('/')[1];else if(domain==='youtube.com'||domain==='m.youtube.com'||domain==='youtube-nocookie.com'){id=url.searchParams.get('v')||'';if(!id)id=url.pathname.match(/^\/(?:embed|shorts|live)\/([\w-]{11})/)?.[1]||'';}return VIDEO_RE.test(id)?id:''}catch{return ''}}
 export const fmt=(n)=>Number.isFinite(n)&&n>=0?`${String(Math.floor(n/60)).padStart(2,'0')}:${String(Math.floor(n%60)).padStart(2,'0')}`:'--:--';
 export const keyOf=(t)=>[t?.artist,t?.title].map(v=>String(v||'').normalize('NFKC').toLocaleLowerCase().replace(/[^\p{L}\p{N}]/gu,'')).join('::');
-export const profileId=(deck)=>`${keyOf(deck)}|${deck.videoId}`;
+export const profileId=(deck)=>`${keyOf(deck)}|${deck.localId||deck.videoId}`;
 export const clamp=(v,min,max)=>Math.min(max,Math.max(min,Number(v)||0));
 // IFrame API bootstrap with explicit failures, retry and a second readiness signal.
 // Some browser extensions block iframe_api; no YouTube API key is involved here.

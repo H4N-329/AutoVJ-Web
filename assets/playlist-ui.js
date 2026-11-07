@@ -1,3 +1,4 @@
+import {putLocalVideo} from './local-media.js';
 import {trackKey,videoIdOf,parsePlaylist,mergeRows,exportPlaylistCsv} from './playlist.mjs';
 const $=id=>document.getElementById(id),LIST_KEY='autovj-web-v6-playlist',SIZE=75;
 const load=()=>{try{const v=JSON.parse(localStorage.getItem(LIST_KEY));return Array.isArray(v)?mergeRows([],v):[]}catch{return []}};
@@ -11,24 +12,24 @@ async function decodeFile(file){
  try{return new TextDecoder('utf-8',{fatal:true}).decode(bytes)}
  catch{return new TextDecoder('shift_jis',{fatal:true}).decode(bytes)}
 }
-export function initPlaylistUI({getMapping,getOffset,assign,unassign,saveOffset,getToken,toast}){
+export function initPlaylistUI({getMapping,getOffset,assign,unassign,saveOffset,getToken,toast,assignLocal}){
  let rows=load(),chosen=null,offsetPage=0,results=[],busy=false;
  const lookup=()=>rows.find(t=>trackKey(t)===chosen)||null;
  function filtered(){const text=$('prep-filter').value.normalize('NFKC').toLowerCase().trim(),state=$('prep-state').value;return rows.filter(t=>{
-  const has=!!videoIdOf(getMapping(t)?.video_id);
+  const has=!!(videoIdOf(getMapping(t)?.video_id)||getMapping(t)?.local_id);
   return (!text||(t.title+' '+t.artist).normalize('NFKC').toLowerCase().includes(text))&&(state==='all'||(state==='set'&&has)||(state==='unset'&&!has));
  })}
  function renderList(){
   const f=filtered();const lastPage=Math.max(0,Math.ceil(f.length/SIZE)-1);offsetPage=Math.min(lastPage,offsetPage);
-  $('prep-total').textContent=rows.length;$('prep-ready').textContent=rows.filter(t=>videoIdOf(getMapping(t)?.video_id)).length;$('prep-empty').textContent=rows.length-Number($('prep-ready').textContent);
+  $('prep-total').textContent=rows.length;$('prep-ready').textContent=rows.filter(t=>videoIdOf(getMapping(t)?.video_id)||getMapping(t)?.local_id).length;$('prep-empty').textContent=rows.length-Number($('prep-ready').textContent);
   $('prep-count').textContent=f.length+'曲';$('prep-page').textContent=f.length?`${offsetPage*SIZE+1}–${Math.min((offsetPage+1)*SIZE,f.length)} / ${f.length}`:'0件';$('prep-prev').disabled=offsetPage===0;$('prep-next').disabled=offsetPage>=lastPage;
   const host=$('prep-list');host.replaceChildren();if(!f.length){const p=document.createElement('p');p.className='muted';p.style.padding='14px';p.textContent=rows.length?'該当する楽曲がありません。':'CSVを読み込むか「＋ 曲を追加」から登録してください。';host.append(p);return}
   for(const [i,t] of f.slice(offsetPage*SIZE,(offsetPage+1)*SIZE).entries()){
-   const selected=trackKey(t)===chosen;const id=videoIdOf(getMapping(t)?.video_id);
+   const selected=trackKey(t)===chosen;const mapping=getMapping(t)||{},id=videoIdOf(mapping.video_id)||mapping.local_id;
    const b=document.createElement('button');b.type='button';b.className='prep-item'+(selected?' selected':'');b.setAttribute('role','option');b.setAttribute('aria-selected',String(selected));
    const number=document.createElement('span');number.className='prep-number';number.textContent=String(offsetPage*SIZE+i+1).padStart(2,'0');
    const text=document.createElement('div');text.style.minWidth='0';const song=document.createElement('div');song.className='prep-name';song.textContent=t.title;const artist=document.createElement('div');artist.className='prep-artist';artist.textContent=t.artist;text.append(song,artist);
-   const status=document.createElement('span');status.className='prep-mark'+(id?' ready':'');status.textContent=id?'✓ MV設定済':'未設定';b.append(number,text,status);
+   const status=document.createElement('span');status.className='prep-mark'+(id?' ready':'');status.textContent=mapping.local_id?'✓ ローカル設定済':id?'✓ MV設定済':'未設定';b.append(number,text,status);
    b.addEventListener('click',()=>{chosen=trackKey(t);results=[];render()});host.append(b);
   }
  }
@@ -36,11 +37,12 @@ export function initPlaylistUI({getMapping,getOffset,assign,unassign,saveOffset,
   const track=lookup();$('prep-empty-detail').hidden=!!track;$('prep-editor').hidden=!track;
   if(!track)return;
   $('prep-selected-title').textContent=track.title;$('prep-selected-artist').textContent=track.artist;
-  const old=getMapping(track)||{},id=videoIdOf(old.video_id);
+  const old=getMapping(track)||{},id=videoIdOf(old.video_id),localId=old.local_id;
   const host=$('prep-current-mv');host.replaceChildren();
-  if(id){const img=new Image();img.src=thumb(id);img.alt='選択したMVのサムネイル';const body=document.createElement('div');const title=document.createElement('strong');title.textContent=old.title||'保存済みMV';const link=document.createElement('a');link.href=`https://www.youtube.com/watch?v=${id}`;link.target='_blank';link.rel='noopener noreferrer';link.textContent='YouTubeで内容を確認';body.append(title,document.createElement('br'),link);host.append(img,body)}
+  if(localId){const strong=document.createElement('strong');strong.textContent='● ローカル動画：'+(old.local_name||'登録済み');host.append(strong)}
+  else if(id){const img=new Image();img.src=thumb(id);img.alt='選択したMVのサムネイル';const body=document.createElement('div');const title=document.createElement('strong');title.textContent=old.title||'保存済みMV';const link=document.createElement('a');link.href=`https://www.youtube.com/watch?v=${id}`;link.target='_blank';link.rel='noopener noreferrer';link.textContent='YouTubeで内容を確認';body.append(title,document.createElement('br'),link);host.append(img,body)}
   else host.textContent='MV未設定です。候補検索またはURL指定で登録できます。';
-  $('prep-offset').value=id?String(getOffset(track,id)||0):'0';$('prep-save-offset').disabled=!id;
+  const sourceId=localId||id;$('prep-offset').value=sourceId?String(getOffset(track,sourceId)||0):'0';$('prep-save-offset').disabled=!sourceId;
   renderResults();
  }
  function renderResults(){const host=$('prep-results');host.replaceChildren();if(busy){const p=document.createElement('p');p.className='muted';p.textContent='YouTubeで候補を検索中…';host.append(p);return}if(!results.length){const p=document.createElement('p');p.className='muted small';p.textContent='候補を探す場合は「YouTubeでMV候補を検索」を押してください。';host.append(p);return}
@@ -68,8 +70,13 @@ export function initPlaylistUI({getMapping,getOffset,assign,unassign,saveOffset,
  $('prep-filter').addEventListener('input',()=>{offsetPage=0;renderList()});$('prep-state').addEventListener('change',()=>{offsetPage=0;renderList()});$('prep-prev').addEventListener('click',()=>{offsetPage=Math.max(0,offsetPage-1);renderList()});$('prep-next').addEventListener('click',()=>{offsetPage++;renderList()});
  $('prep-find').addEventListener('click',search);
  $('prep-assign-url').addEventListener('click',()=>{const id=videoIdOf($('prep-url').value);if(!id){message('有効なYouTube動画URLまたは11文字の動画IDを入力してください');return}saveVideo(id,{title:'URL指定MV'})});
- $('prep-remove-mv').addEventListener('click',()=>{const t=lookup();if(!t)return;if(!getMapping(t)?.video_id)return;unassign(t);message(t.title+'の保存済みMV対応を解除しました（再生中の映像は変更しません）。');render()});
- $('prep-save-offset').addEventListener('click',()=>{const t=lookup();if(!t)return;const id=videoIdOf(getMapping(t)?.video_id);if(!id)return message('先にMVを設定してください');const v=Number($('prep-offset').value);if(!Number.isFinite(v)||Math.abs(v)>600)return message('オフセットは-600〜600秒で入力してください');saveOffset(t,id,v);message(`曲別オフセット ${v}秒を保存しました`)});
+ $('prep-remove-mv').addEventListener('click',()=>{const t=lookup();if(!t)return;if(!getMapping(t)?.video_id&&!getMapping(t)?.local_id)return;unassign(t);message(t.title+'の保存済みMV対応を解除しました（再生中の映像は変更しません）。');render()});
+ $('prep-save-offset').addEventListener('click',()=>{const t=lookup();if(!t)return;const m=getMapping(t)||{};const id=m.local_id||videoIdOf(m.video_id);if(!id)return message('先に動画を設定してください');const v=Number($('prep-offset').value);if(!Number.isFinite(v)||Math.abs(v)>600)return message('オフセットは-600〜600秒で入力してください');saveOffset(t,id,v);message(`曲別オフセット ${v}秒を保存しました`)});
+ $('prep-local-file').addEventListener('change',async e=>{const f=e.target.files?.[0],t=lookup();e.target.value='';if(!f||!t)return;
+  $('prep-local-status').textContent='Macのブラウザ内に動画を保存中…';
+  try{const rec=await putLocalVideo(f);assignLocal(t,rec);message(t.artist+' - '+t.title+'：'+rec.name+' をローカル動画として設定しました');$('prep-local-status').textContent=rec.name+'（'+Math.round(rec.size/1048576)+'MB）保存済み';render()}
+  catch(err){$('prep-local-status').textContent='保存失敗: '+err.message;message('ローカル動画: '+err.message)}
+ });
  if(rows.length)chosen=trackKey(rows[0]);render();
  return{render};
 }
