@@ -1,3 +1,5 @@
+> v6.4.1の更新手順と現在の起動方法は UPDATE_GUIDE_JA.md を参照してください。
+
 # AutoVJ Web v6.4 — HYBRID切り替え 導入・操作ガイド
 
 ## 対象構成

@@ -11,6 +11,28 @@ export const fmt=(n)=>Number.isFinite(n)&&n>=0?`${String(Math.floor(n/60)).padSt
 export const keyOf=(t)=>[t?.artist,t?.title].map(v=>String(v||'').normalize('NFKC').toLocaleLowerCase().replace(/[^\p{L}\p{N}]/gu,'')).join('::');
 export const profileId=(deck)=>`${keyOf(deck)}|${deck.localId||deck.videoId}`;
 export const clamp=(v,min,max)=>Math.min(max,Math.max(min,Number(v)||0));
+
+export async function fetchAutoVJ(url,options={},timeoutMs=9000){
+ const controller=new AbortController();
+ const timer=setTimeout(()=>controller.abort(),timeoutMs);
+ try{
+  const response=await fetch(url,{...options,cache:'no-store',redirect:'error',signal:controller.signal});
+  const data=await response.json().catch(()=>null);
+  if(controller.signal.aborted)throw Error('接続がタイムアウトしました');
+  if(!response.ok){
+   const error=Error(data?.error||`HTTP ${response.status} / Vercelの本番URLとDeployment Protectionを確認してください`);
+   error.status=response.status;
+   error.code=data?.code;
+   throw error;
+  }
+  if(!data||typeof data!=='object'||Array.isArray(data))throw Error('AutoVJ APIの応答を確認できません。Vercelの本番URLを確認してください');
+  return data;
+ }catch(error){
+  if(controller.signal.aborted)throw Error('接続がタイムアウトしました');
+  if(error instanceof TypeError)throw Error('通信できません。ネットワークとVercelの本番URLを確認してください');
+  throw error;
+ }finally{clearTimeout(timer)}
+}
 // IFrame API bootstrap with explicit failures, retry and a second readiness signal.
 // Some browser extensions block iframe_api; no YouTube API key is involved here.
 export function youtubeError(code){

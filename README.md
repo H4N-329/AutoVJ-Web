@@ -1,4 +1,4 @@
-# AutoVJ Web v6.4 — HYBRID Local / YouTube Switch
+# AutoVJ Web v6.4.1 — HYBRID Local / YouTube Switch
 
 rekordboxの曲名・経過時間のOCR監視、YouTube公式MV検索・再生、iPad第6世代からの遠隔操作、曲別MV事前設定に加えて、**許諾済みローカル動画の裏再生と0.5〜1秒のクロスフェード**を追加したバージョンです。
 
@@ -13,3 +13,6 @@ rekordboxの曲名・経過時間のOCR監視、YouTube公式MV検索・再生�
 重要: プロジェクター出力側のローカル動画ファイルを読み取るため、DJ LIVEも出力画面も、ファイル登録に使用したMacのChrome（同じプロフィールと同じVercel URL）で開いてください。ブラウザのサイトデータ削除でローカル動画の保存も消える場合があります。別のMacへ移動する場合は動画ファイルを再登録してください。
 
 **動作確認**：Node.jsでの新旧ロジック/APIユニットテスト合格。Mac実機・Chromeでの実動画クロスフェード、およびrekordbox/YouTube/iPadの統合テストは未検証です。
+
+
+v6.4.1の更新・手動起動は UPDATE_GUIDE_JA.md、変更点と確認範囲は TEST_RESULTS_JA.md を参照してください。

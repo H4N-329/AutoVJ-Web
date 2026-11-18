@@ -11,16 +11,76 @@ function actionOf(a){if(!a||typeof a!=='object'||Array.isArray(a))return null;co
  switch(a.type){case 'take':case 'arm':case 'refresh':return{type:a.type,side};case 'clearArm':case 'sync':return{type:a.type};case 'mode':return ['off','safe','mix','stop','hybrid'].includes(a.mode)?{type:'mode',mode:a.mode}:null;case 'autoSync':return typeof a.enabled==='boolean'?{type:'autoSync',enabled:a.enabled}:null;case 'seek':return [-5,-1,1,5].includes(Number(a.delta))?{type:'seek',delta:Number(a.delta)}:null;case 'lead':return Number.isFinite(Number(a.value))&&Number(a.value)>=-5&&Number(a.value)<=5?{type:'lead',value:Number(a.value)}:null;case 'offset':return [-1,-.5,.5,1].includes(Number(a.delta))?{type:'offset',delta:Number(a.delta)}:null;case 'search':return {type:'search',side,title:String(a.title||'').trim().slice(0,180),artist:String(a.artist||'').trim().slice(0,180)};case 'choose':return /^[\w-]{11}$/.test(String(a.videoId||''))?{type:'choose',side,videoId:String(a.videoId)}:null;default:return null}}
 function cleanState(body){if(!body||typeof body!=='object'||Array.isArray(body))return null;const deck={};for(const side of ['left','right']){const d=body.decks?.[side]||{};const id=/^[\w-]{11}$/.test(String(d.videoId||''))?d.videoId:'';deck[side]={title:String(d.title||'').slice(0,180),artist:String(d.artist||'').slice(0,180),elapsed:d.elapsed===null||d.elapsed===undefined||!Number.isFinite(Number(d.elapsed))?null:Math.max(0,Math.min(36000,Number(d.elapsed))),playing:['playing','paused','unknown'].includes(d.playing)?d.playing:'unknown',videoId:id,localId:/^local-[\w-]{10,}$/.test(String(d.localId||''))?d.localId:'',localName:String(d.localName||'').slice(0,180),videoStatus:String(d.videoStatus||'').slice(0,150),videoTitle:String(d.videoTitle||'').slice(0,160),candidates:Array.isArray(d.candidates)?d.candidates.slice(0,5).filter(x=>/^[\w-]{11}$/.test(String(x?.id||''))).map(x=>({id:x.id,title:String(x.title||'').slice(0,180),channel:String(x.channel||'').slice(0,80),score:Number(x.score)||0})):[]};}
  return{decks:deck,active:['left','right'].includes(body.active)?body.active:null,armed:['left','right'].includes(body.armed)?body.armed:null,mode:['off','safe','mix','stop','hybrid'].includes(body.mode)?body.mode:'off',autoSync:!!body.autoSync,lead:Math.max(-5,Math.min(5,Number(body.lead)||0)),outputConnected:!!body.outputConnected,outputTime:body.outputTime!=null&&Number.isFinite(Number(body.outputTime))?Math.max(0,Number(body.outputTime)):null,bridgeConnected:!!body.bridgeConnected,updatedAt:Date.now()}}
-async function handler(req,res){if(!auth(req))return respond(res,401,{error:'アクセストークンが不正、または未設定です（16文字以上が必要）'});const code=sessionCode(req.query?.session);if(!code)return respond(res,400,{error:'ペアリングコードは英数字6〜12文字です'});const base=PREFIX+code+':';try{if(req.method==='GET'){
- const mode=req.query?.mode||'status';if(mode==='hello'){const n=Number(await redis(['GET',base+'seq']))||0;return respond(res,200,{ok:true,seq:n})}
- if(mode==='status'){const raw=await redis(['GET',base+'status']);let state=null;try{state=raw?JSON.parse(raw):null}catch{}return respond(res,200,{state})}
- if(mode==='commands'){const after=Math.max(0,Math.floor(Number(req.query.after)||0));const end=Number(await redis(['GET',base+'seq']))||0;const start=Math.max(after+1,end-24);const commands=[];let cursor=after;for(let seq=start;seq<=end;seq++){const raw=await redis(['GET',base+'cmd:'+seq]);if(!raw){/* INCR may have happened just before SET: retry next poll. */ if(seq===end||seq>=end-2)break; cursor=seq;continue}try{const item=JSON.parse(raw);if(item&&item.seq===seq&&Date.now()-item.createdAt<30000)commands.push(item)}catch{}cursor=seq}return respond(res,200,{seq:cursor,commands})}
- return respond(res,400,{error:'modeが不正です'})}
- if(req.method==='POST'){
- if(Number(req.headers?.['content-length']||0)>25000)return respond(res,413,{error:'送信データが大きすぎます'});
- const body=typeof req.body==='string'?JSON.parse(req.body):req.body;const mode=req.query?.mode||'command';if(mode==='state'){const clean=cleanState(body);if(!clean)return respond(res,400,{error:'状態データが不正です'});await redis(['SET',base+'status',JSON.stringify(clean),'EX','14']);return respond(res,200,{ok:true,updatedAt:clean.updatedAt})}
- if(mode==='command'){const command=actionOf(body);if(!command)return respond(res,400,{error:'対応していない操作です'});const seq=Number(await redis(['INCR',base+'seq']));await redis(['EXPIRE',base+'seq','86400']);const payload={seq,command,createdAt:Date.now()};await redis(['SET',base+'cmd:'+seq,JSON.stringify(payload),'EX','90']);return respond(res,200,{ok:true,seq})}
- return respond(res,400,{error:'modeが不正です'})}
- return respond(res,405,{error:'GET/POSTのみ対応です'});
- }catch(e){console.error('remote',String(e));return respond(res,503,{error:e.message==='REDIS_NOT_CONFIGURED'?'Redis環境変数が未設定です':'リモート連携に接続できません'})}}
+async function handler(req,res){
+ if(!auth(req))return respond(res,401,{error:'アクセストークンが不正、または未設定です（16文字以上が必要）'});
+ const code=sessionCode(req.query?.session);
+ if(!code)return respond(res,400,{error:'ペアリングコードは英数字6〜12文字です'});
+ const base=PREFIX+code+':';
+ try{
+  const mode=req.query?.mode||(req.method==='GET'?'status':'command');
+  if(req.method==='GET'){
+   if(mode==='hello')return respond(res,200,{ok:true,seq:Number(await redis(['GET',base+'seq']))||0});
+   if(mode==='status'){
+    const raw=await redis(['GET',base+'status']);
+    let state=null;
+    try{state=raw?JSON.parse(raw):null}catch{}
+    return respond(res,200,{state});
+   }
+   if(mode==='commands'){
+    const value=Number(req.query.after||0);
+    if(!Number.isSafeInteger(value)||value<0)return respond(res,400,{error:'操作番号が不正です'});
+    const end=Number(await redis(['GET',base+'seq']))||0;
+    // A session's sequence can expire after a day without commands.
+    const after=value>end?0:value,start=Math.max(after+1,end-24);
+    const keys=[];
+    for(let seq=start;seq<=end;seq++)keys.push(base+'cmd:'+seq);
+    const values=keys.length?await redis(['MGET',...keys]):[];
+    const commands=[];
+    let cursor=after;
+    for(let index=0;index<values.length;index++){
+     const seq=start+index,raw=values[index];
+     if(!raw){
+      // INCR can become visible before SET. Keep recent gaps for the next poll.
+      if(seq>=end-2)break;
+      cursor=seq;continue;
+     }
+     try{
+      const item=JSON.parse(raw),age=Date.now()-Number(item?.createdAt);
+      const command=actionOf(item?.command);
+      if(item?.seq===seq&&command&&age>=-2000&&age<30000)commands.push({...item,command});
+     }catch{}
+     cursor=seq;
+    }
+    return respond(res,200,{seq:cursor,commands});
+   }
+   return respond(res,400,{error:'modeが不正です'});
+  }
+  if(req.method==='POST'){
+   if(Number(req.headers?.['content-length']||0)>25000)return respond(res,413,{error:'送信データが大きすぎます'});
+   let body;
+   try{body=typeof req.body==='string'?JSON.parse(req.body):req.body}
+   catch{return respond(res,400,{error:'JSON形式が不正です'})}
+   if(mode==='state'){
+    const clean=cleanState(body);
+    if(!clean)return respond(res,400,{error:'状態データが不正です'});
+    await redis(['SET',base+'status',JSON.stringify(clean),'EX','14']);
+    return respond(res,200,{ok:true,updatedAt:clean.updatedAt});
+   }
+   if(mode==='command'){
+    const command=actionOf(body);
+    if(!command)return respond(res,400,{error:'対応していない操作です'});
+    const seq=Number(await redis(['INCR',base+'seq']));
+    await redis(['EXPIRE',base+'seq','86400']);
+    const payload={seq,command,createdAt:Date.now()};
+    await redis(['SET',base+'cmd:'+seq,JSON.stringify(payload),'EX','90']);
+    return respond(res,200,{ok:true,seq});
+   }
+   return respond(res,400,{error:'modeが不正です'});
+  }
+  return respond(res,405,{error:'GET/POSTのみ対応です'});
+ }catch(e){
+  console.error('remote',e.message==='REDIS_NOT_CONFIGURED'?'REDIS_NOT_CONFIGURED':'REDIS_REQUEST_FAILED');
+  return respond(res,503,{error:e.message==='REDIS_NOT_CONFIGURED'?'Redis環境変数が未設定です':'リモート連携に接続できません'});
+ }
+}
 module.exports=handler;module.exports.sessionCode=sessionCode;module.exports.actionOf=actionOf;module.exports.cleanState=cleanState;

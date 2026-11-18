@@ -1,0 +1,12 @@
+.env
+.env.*
+!.env.example
+node_modules/
+.vercel/
+.DS_Store
+bridge/.venv/
+bridge/bridge_config.json
+bridge/mac_ocr/.native/
+__pycache__/
+.pytest_cache/
+bridge/.venv/.autovj_requirements.sha256

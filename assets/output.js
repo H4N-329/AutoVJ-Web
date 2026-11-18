@@ -1,10 +1,10 @@
 import {makeLocalURL} from './local-media.js';
-import {switchEffect,validateFade} from './hybrid-transition.mjs';
+import {mayPreplay,switchEffect,validateFade} from './hybrid-transition.mjs';
 import {openChannel,buildPlayer,VIDEO_RE,renderGenerative,plainYoutubeEmbed,youtubeError,loadYT} from './shared.js';
 const $=id=>document.getElementById(id);
 let player=null,playerInit=null,ready=false,videoId='',localId='',title='',artist='',showOverlay=true,currentMode='idle',stoppedEffect=null,lastTake=null,apiFailed=false,fallback=false,restarting=false;
-let currentLocalSide=null,fadeSeconds=0.75,takeSerial=0;
-const localSlots={left:{id:'',url:'',serial:0,loading:null},right:{id:'',url:'',serial:0,loading:null}};
+let currentLocalSide=null,pendingLocalSide=null,fadingFrom=null,fadeTimer=0,fadeSeconds=0.75,takeSerial=0;
+const localSlots={left:{id:'',url:'',serial:0,request:0,loading:null},right:{id:'',url:'',serial:0,request:0,loading:null}};
 const deckStates={left:null,right:null};
 const channel=openChannel(handle);
 for(const side of ['left','right'])$('local-'+side).addEventListener('error',()=>{const id=localSlots[side].id;if(id)send('local-ready',{deck:side,localId:id,status:'error',message:'動画をデコードできません。Chromeで再生可能なH.264 MP4またはWebMを指定してください。'})});
@@ -41,14 +41,16 @@ function displayFallback(reason){
  send('output-state',{videoId,status:'fallback-no-sync'});
  send('output-error',{message:'API接続不可：通常埋め込みへ切替（同期不可）'});
 }
-async function stageLocal(d){
+async function stageLocal(d,{play=false,retry=false}={}){
  const side=d.deck;if(!['left','right'].includes(side))return;
  const slot=localSlots[side],v=$('local-'+side),id=String(d.localId||'');
+ const request=++slot.request;
  if(!id){
+  if(!slot.id)return false;
   if(slot.url){URL.revokeObjectURL(slot.url);slot.url='';}
-  slot.id='';slot.serial++;slot.loading=null;v.pause();v.removeAttribute('src');v.load();return;
+  slot.id='';slot.serial++;slot.loading=null;v.pause();v.removeAttribute('src');v.load();return false;
  }
- if(slot.id!==id){
+ if(slot.id!==id||(retry&&!slot.url&&!slot.loading)){
   const serial=++slot.serial;slot.id=id;
   if(slot.url)URL.revokeObjectURL(slot.url);
   slot.url='';v.pause();v.removeAttribute('src');v.load();
@@ -56,56 +58,118 @@ async function stageLocal(d){
    if(serial!==slot.serial){URL.revokeObjectURL(url);return;}
    slot.url=url;v.src=url;v.load();v.muted=true;
    send('local-ready',{deck:side,localId:id,status:'loaded'});
-  }).catch(e=>{if(serial===slot.serial)send('local-ready',{deck:side,localId:id,status:'error',message:e.message})});
+  }).catch(e=>{if(serial===slot.serial)send('local-ready',{deck:side,localId:id,status:'error',message:e.message})})
+   .finally(()=>{if(serial===slot.serial)slot.loading=null});
  }
  if(slot.loading)await slot.loading;
- if(slot.id!==id||!slot.url)return;
+ if(request!==slot.request||slot.id!==id||!slot.url)return false;
  const desired=Number(d.startSeconds);
- if(Number.isFinite(desired)){
-  if(v.readyState>=1 && Math.abs(v.currentTime-desired)>1.5){try{v.currentTime=Math.max(0,desired)}catch{}}
-  else if(v.readyState<1){
-   const currentSerial=slot.serial;
-   v.addEventListener('loadedmetadata',()=>{
-    if(slot.serial===currentSerial&&slot.id===id){try{v.currentTime=Math.max(0,desired)}catch{}}
-   },{once:true});
-  }
+ if(Number.isFinite(desired)&&(v.readyState<1||Math.abs(v.currentTime-desired)>1.5)){
+  try{v.currentTime=Math.max(0,desired)}catch{}
  }
- // Local files may preplay muted while another local clip or the visible YouTube
- // player remains on-air. The output is muted; rekordbox supplies the sound.
- if(d.playing==='playing' || (currentMode==='local'&&currentLocalSide===side)){
-  try{await v.play();send('local-ready',{deck:side,localId:id,status:'playing'})}
-  catch(e){send('local-ready',{deck:side,localId:id,status:'blocked',message:e.message})}
- }else if(currentLocalSide!==side){v.pause()}
+ if(!play){
+  if(!v.paused){
+   v.pause();
+   send('local-ready',{deck:side,localId:id,status:'loaded'});
+  }
+  return true;
+ }
+ try{
+  await v.play();
+  if(request!==slot.request)return false;
+  send('local-ready',{deck:side,localId:id,status:'playing'});
+  return true;
+ }catch(e){
+  if(request===slot.request)send('local-ready',{deck:side,localId:id,status:e.name==='NotAllowedError'?'blocked':'error',message:e.message});
+  return false;
+ }
 }
-async function takeLocal(d,priorMode,serial){
- const side=d.deck;if(!['left','right'].includes(side)){setIssue('ローカル動画のDECK番号が不正です','操作画面からTAKEしてください');return}
- const fromSide=currentLocalSide;
- const fromType=priorMode==='local'?'local':priorMode==='video'?'youtube':'generative';
- await stageLocal({...d,playing:'playing'});
- if(serial!==takeSerial)return;
- if(localSlots[side].id!==d.localId || !localSlots[side].url){changeDisplay(priorMode);setIssue('ローカル動画がありません','Macの同じブラウザで「MV事前設定」から動画を再登録してください');return;}
- const v=$('local-'+side),outgoing=fromSide&&fromSide!==side?$('local-'+fromSide):null;
- currentLocalSide=side;changeDisplay('local');setIssue('');
+
+function stageStandby(side){
+ const d=deckStates[side];
+ if(!d||[currentLocalSide,pendingLocalSide,fadingFrom].includes(side))return;
+ const play=mayPreplay({side,active:currentLocalSide,localId:d.localId,playing:d.playing,observedAt:d.observedAt,maxAgeMs:8000});
+ stageLocal(d,{play}).catch(console.warn);
+}
+
+function finishFade(keepPlayingSide=null){
+ clearTimeout(fadeTimer);
+ if(!fadingFrom)return;
+ const outgoing=$('local-'+fadingFrom);
+ outgoing.classList.remove('onair');
+ if(fadingFrom!==keepPlayingSide)outgoing.pause();
+ $('local-'+currentLocalSide).classList.remove('fade-in');
+ fadingFrom=null;
+}
+
+function stopYouTube(){
  try{player?.pauseVideo?.()}catch{}
- const effect=switchEffect(fromType,'local');
+ if(fallback){$('output-player').replaceChildren();fallback=false}
+}
+
+function showTrack(d){
+ title=d.title||'';artist=d.artist||'';
+ videoId=VIDEO_RE.test(d.videoId||'')?d.videoId:'';
+ localId=d.localId||'';renderOverlay();
+}
+
+async function takeLocal(d,serial){
+ const side=d.deck;if(!['left','right'].includes(side)){setIssue('ローカル動画のDECK番号が不正です','操作画面からTAKEしてください');return}
+ pendingLocalSide=side;
+ const playable=await stageLocal(d,{play:true,retry:true});
+ if(serial!==takeSerial)return;
+ pendingLocalSide=null;
+ if(!playable){
+  const detail=localSlots[side].url?'再生を許可してから再試行するか、Mac Chromeで再生できる動画を登録してください。'
+   :'Macの同じブラウザで「MV事前設定」から動画を再登録してください。';
+  setIssue('ローカル動画を出力できません',detail);
+  send('output-error',{message:detail});
+  return;
+ }
+ const fromSide=currentLocalSide;
+ const effect=fromSide!==side?switchEffect(currentMode,'local'):'cut';
+ finishFade(side);
+ const v=$('local-'+side),outgoing=fromSide&&fromSide!==side?$('local-'+fromSide):null;
+ currentLocalSide=side;showTrack(d);changeDisplay('local');setIssue('');stopYouTube();
  $('output-local-stage').style.setProperty('--local-fade-duration',`${Math.round(fadeSeconds*1000)}ms`);
- if(effect!=='crossfade'||!outgoing){for(const v2 of document.querySelectorAll('.output-local-video'))v2.classList.remove('onair');
-   // Force no transition after a YouTube/generative take.
-   v.style.transition='none';v.classList.add('onair');void v.offsetWidth;v.style.transition='';
+ if(effect==='crossfade'&&outgoing){
+  fadingFrom=fromSide;
+  v.classList.remove('onair');
+  v.classList.add('fade-in');
+  void v.offsetWidth;
+  v.classList.add('onair');
+  fadeTimer=setTimeout(()=>{finishFade(pendingLocalSide);stageStandby(fromSide)},Math.round(fadeSeconds*1000)+70);
  }else{
-   v.classList.add('onair');outgoing.classList.remove('onair');
-   setTimeout(()=>{if(currentLocalSide!==fromSide)outgoing.pause()},Math.round(fadeSeconds*1000)+100);
+  if(outgoing){outgoing.classList.remove('onair');outgoing.pause()}
+  v.classList.add('onair');
  }
  send('output-state',{localId,videoId:'',status:'local-playing',effect,duration:effect==='crossfade'?fadeSeconds:0});
 }
 function take(d){
  const serial=++takeSerial;
- const priorMode=currentMode;
- lastTake=d;title=d.title||'';artist=d.artist||'';videoId=VIDEO_RE.test(d.videoId||'')?d.videoId:'';localId=d.localId||'';renderOverlay();
- if(localId){takeLocal(d,priorMode,serial).catch(err=>send('output-error',{message:'ローカル動画TAKE: '+err.message}));return}
- currentLocalSide=null;for(const side of ['left','right']){$('local-'+side).classList.remove('onair');} 
+ const previousPending=pendingLocalSide;
+ pendingLocalSide=null;
+ if(previousPending){
+  localSlots[previousPending].request++;
+  if(previousPending!==currentLocalSide)$('local-'+previousPending).pause();
+ }
+ lastTake=d;
+ if(d.localId){
+  takeLocal(d,serial).catch(err=>{
+   if(serial!==takeSerial)return;
+   pendingLocalSide=null;
+   send('output-error',{message:'ローカル動画TAKE: '+err.message});
+  });
+  if(previousPending&&previousPending!==d.deck)stageStandby(previousPending);
+  return;
+ }
+ finishFade();showTrack(d);currentLocalSide=null;
+ for(const side of ['left','right']){
+  const v=$('local-'+side);
+  v.classList.remove('onair','fade-in');v.pause();stageStandby(side);
+ }
  if(!videoId){
-  localId='';changeDisplay('generative');try{player?.pauseVideo?.()}catch{}
+  stopYouTube();changeDisplay('generative');
   setIssue('');send('output-state',{videoId:'',status:'generative'});return;
  }
  if(apiFailed){displayFallback('YouTube IFrame APIが使えません');return}
@@ -124,7 +188,7 @@ async function startPlayer(){
  restarting=true;apiFailed=false;fallback=false;ready=false;
  try{
   await loadYT();
-  if(!lastTake?.videoId){setIssue('');return}
+  if(!lastTake?.videoId||lastTake.localId)return;
   try{player?.destroy?.()}catch{}
   player=null;
   const target=lastTake.videoId;
@@ -136,12 +200,12 @@ async function startPlayer(){
   });
   const p=await playerInit;
   player=p;ready=true;playerInit=null;apiFailed=false;setIssue('');
-  if(lastTake)take(lastTake);
+  if(lastTake?.videoId&&!lastTake.localId)take(lastTake);
  }catch(err){
   apiFailed=true;ready=false;playerInit=null;
   console.error('YouTube IFrame API bootstrap',err);
-  if(lastTake?.videoId)displayFallback(`${err.code||'YT_INIT_ERROR'}: ${err.message}`);
-  else{
+  if(lastTake?.videoId&&!lastTake.localId)displayFallback(`${err.code||'YT_INIT_ERROR'}: ${err.message}`);
+  else if(currentMode==='idle'&&!lastTake?.localId){
    changeDisplay('idle');$('output-idle').querySelector('p').textContent='YouTubeプレーヤーの起動に失敗しました';
    setIssue(`YouTube API読込エラー [${err.code||'YT_INIT_ERROR'}]`,err.message+'。ブラウザの拡張機能を無効にして再試行してください。');
   }
@@ -152,13 +216,21 @@ async function startPlayer(){
 function handle(d){
  if(!d||typeof d!=='object')return;
  if(d.type==='take')take(d);
- else if(d.type==='deck-state'){const side=d.deck;if(['left','right'].includes(side)){deckStates[side]=d;stageLocal(d).catch(console.warn)}}
+ else if(d.type==='deck-state'){const side=d.deck;if(['left','right'].includes(side)){deckStates[side]=d;stageStandby(side)}}
  else if(d.type==='seek'&&d.localId&&currentMode==='local'&&d.localId===localId){const v=$('local-'+currentLocalSide);const sec=d.absolute!=null?Number(d.absolute):v.currentTime+Number(d.delta||0);if(Number.isFinite(sec))try{v.currentTime=Math.max(0,sec)}catch{}}
  else if(d.type==='seek'&&player&&ready&&!fallback&&videoId&&d.videoId===videoId){
   try{const sec=d.absolute!=null?Number(d.absolute):player.getCurrentTime()+Number(d.delta||0);if(Number.isFinite(sec))player.seekTo(Math.max(0,sec),true)}catch(e){console.warn(e)}
  }else if(d.type==='config'){showOverlay=d.overlay!==false;fadeSeconds=validateFade(d.localFade||0.75);renderOverlay()}
 }
-$('activate').addEventListener('click',()=>{try{player?.mute();player?.playVideo()}catch{};if(fallback)setIssue('通常埋め込み再生中','動画内の再生ボタンから操作してください。秒数の自動同期は利用できません。','warning')});
+$('activate').addEventListener('click',()=>{
+ if(lastTake?.localId&&localSlots[lastTake.deck]?.url){
+  const retry=lastTake;
+  $('local-'+retry.deck).play().then(()=>{if(lastTake===retry)take(retry)}).catch(()=>{});
+  return;
+ }
+ try{player?.mute();player?.playVideo()}catch{}
+ if(fallback)setIssue('通常埋め込み再生中','動画内の再生ボタンから操作してください。秒数の自動同期は利用できません。','warning');
+});
 $('retry-youtube').addEventListener('click',()=>{if(!restarting)startPlayer()});
 $('go-fullscreen').addEventListener('click',()=>document.documentElement.requestFullscreen?.());
 setInterval(()=>{
@@ -166,7 +238,13 @@ setInterval(()=>{
  else if(currentMode==='video'&&player&&ready&&!fallback){let time=null,state=-1;try{time=player.getCurrentTime();state=player.getPlayerState()}catch{}if(Number.isFinite(time))send('telemetry',{videoId,time,state})}
  else if(currentMode==='generative')send('telemetry',{videoId:'',time:null,state:-1})
 },500);
-setInterval(()=>send('output-heartbeat',{videoId,localId,mode:currentMode,fallback}),2500);
+setInterval(()=>{
+ send('output-heartbeat',{videoId,localId,mode:currentMode,fallback});
+ for(const side of ['left','right']){
+  const d=deckStates[side];
+  if(d?.playing==='playing'&&Date.now()-d.observedAt>=8000){d.playing='unknown';stageStandby(side)}
+ }
+},2500);
 window.addEventListener('beforeunload',()=>send('output-closed'));
 send('output-ready');
 // YouTube is lazy-loaded on the first YouTube TAKE; local files work offline.

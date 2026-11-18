@@ -6,59 +6,44 @@ never screenshot/audio or YouTube API keys. No third-party/unofficial rekordbox 
 The existing v5.9 deck ROI calibration is reused.
 """
 from __future__ import annotations
-import json
-import os
+import fcntl
 import sys
 import threading
 import time
-import urllib.request
-import urllib.error
 from pathlib import Path
-from getpass import getpass
+
+from autovj_launcher import STATE_DIR, load_bridge_config
+from bridge_http import BridgeRequestError, request
 
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT / 'mac_ocr'))
 from deck_capture import VisionOCR, capture_and_read, capture_elapsed_fast, read_config, DeckStabilizer
 from playback_detector import PlaybackDetector, parse_elapsed
 from track_bridge import track_key
-from tls_config import verified_ssl_context
 
-CONFIG = ROOT/'bridge_config.json'
-
-
-def options():
-    saved={}
-    try: saved=json.loads(CONFIG.read_text('utf8'))
-    except (OSError, ValueError): pass
-    if not saved.get('url'):
-        print('AutoVJ WebのVercel URLを入力してください (例: https://autovj-xxx.vercel.app)')
-        saved['url']=input('URL: ').strip()
-    if not saved.get('token'):
-        saved['token']=getpass('Vercel AUTOVJ_ACCESS_TOKEN: ').strip()
-    url=saved['url'].rstrip('/')
-    if not url.startswith('https://') and not url.startswith('http://localhost:'):
-        raise ValueError('URLはHTTPSで指定してください')
-    if not saved['token'] or len(saved['token']) < 16:
-        raise ValueError('トークンが短すぎます（16文字以上）')
-    CONFIG.write_text(json.dumps(saved,ensure_ascii=False,indent=2),'utf8')
-    try: os.chmod(CONFIG,0o600)
-    except OSError: pass
-    return saved
-
-
-def send(url,token,decks):
-    data=json.dumps({'decks':decks}).encode('utf8')
-    req=urllib.request.Request(url.rstrip('/')+'/api/bridge',data=data,method='POST',headers={
-        'Content-Type':'application/json','X-AutoVJ-Token':token,'User-Agent':'AutoVJ-Web-MacBridge/6.0'
-    })
-    with urllib.request.urlopen(req,timeout=12,context=verified_ssl_context()) as response:
-        response.read()
+SIDES = ('left', 'right')
 
 
 def run():
     if sys.platform!='darwin':
         raise RuntimeError('このブリッジはmacOSでのみ実行できます')
-    cfg=options()
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    with (STATE_DIR/'bridge.lock').open('a') as lockfile:
+        try:
+            fcntl.flock(lockfile, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise RuntimeError('監視ブリッジは起動済みです。先に起動したターミナルで Ctrl+C、または STOP_AUTOVJ.command で停止できます。') from None
+        cfg = load_bridge_config(prompt=sys.stdin.isatty())
+        try:
+            request(cfg['url'], cfg['token'])
+        except BridgeRequestError as exc:
+            if not exc.retryable:
+                raise
+            print(f'接続確認: {exc} / 監視開始後も再接続を試します。', flush=True)
+        monitor(cfg)
+
+
+def monitor(cfg):
     roi=read_config()
     reader=VisionOCR(ROOT/'mac_ocr')
     reader.ensure()
@@ -66,7 +51,9 @@ def run():
     motion=PlaybackDetector(advance_samples=2,pause_samples=2)
     lock=threading.RLock()
     state={s:{'title':'','artist':'','elapsed':None,'playing':'unknown',
-              'clockObservedAt':0,'clockRaw':'','clockSource':''} for s in ('left','right')}
+              'clockObservedAt':0,'clockSource':''} for s in SIDES}
+    track_since = dict.fromkeys(SIDES, 0.0)
+    last_clock = dict.fromkeys(SIDES, 0.0)
     stopped=threading.Event()
     def accept_clock(side, raw, observed_ms, observed_mono, source):
         """Accept only parsed, in-order OCR samples for the currently known track.
@@ -75,27 +62,30 @@ def run():
         """
         track = tracks.tracks[side]
         seconds = parse_elapsed(raw)
-        if not track or seconds is None or observed_ms <= state[side]['clockObservedAt']:
+        if not track or seconds is None or observed_mono < track_since[side] or observed_mono - last_clock[side] < 0.4:
             return False
         ident = track_key(track)
+        if tracks.raw[side] is not None and tracks.raw[side] != ident:
+            return False
         motion.observe(side, ident, raw, observed_mono, confirmed=True)
+        last_clock[side] = observed_mono
         state[side]['elapsed'] = seconds
         state[side]['clockObservedAt'] = observed_ms
-        state[side]['clockRaw'] = str(raw)[:32]
         state[side]['clockSource'] = source
         raw_state = motion.status(side, time.monotonic())
         state[side]['playing'] = ('playing' if raw_state == '再生中' else
                                  'paused' if raw_state == '停止' else 'unknown')
         return True
 
-    last_warning = {'left':0.0, 'right':0.0}
+    last_warning = dict.fromkeys(SIDES, -12.0)
     def report_missing(side, raw):
         # Give actionable feedback without logging one warning for every frame.
         now = time.monotonic()
         if now-last_warning[side] < 12:
             return
         last_warning[side] = now
-        print(f'[時刻OCR] {side} は未取得（認識文字={raw!r}）。'
+        deck = 'DECK 1' if side == 'left' else 'DECK 2'
+        print(f'[時刻OCR] {deck} は未取得（認識文字={str(raw)[:48]!r}）。'
               'DIAGNOSE_TIMERS.command で経過時間の読取枠を確認してください。', flush=True)
 
     def full():
@@ -106,16 +96,19 @@ def run():
                 observed, elapsed = capture_and_read(reader,roi)
                 with lock:
                     tracks.update(observed)
-                    for side in ('left','right'):
+                    for side in SIDES:
                         track=tracks.tracks[side]
                         if not track:continue
                         if (state[side]['title'],state[side]['artist'])!=(track['title'],track['artist']):
                             state[side].update({'title':track['title'],'artist':track['artist'],
                                                 'elapsed':None,'playing':'unknown',
-                                                'clockObservedAt':0,'clockRaw':'','clockSource':''})
+                                                'clockObservedAt':0,'clockSource':''})
+                            track_since[side] = observed_mono
+                            last_clock[side] = 0.0
                             motion.observe(side,track_key(track),'',time.monotonic(),confirmed=False)
                         # Reuse accurate timer OCR already read alongside the titles.
-                        accept_clock(side, elapsed.get(side,''),observed_ms,observed_mono,'full-accurate')
+                        if observed.get(side):
+                            accept_clock(side, elapsed.get(side,''),observed_ms,observed_mono,'full-accurate')
             except Exception as exc:
                 print('曲名OCRの問題:',str(exc)[:160],flush=True)
             stopped.wait(2)
@@ -128,11 +121,12 @@ def run():
                 # Fast Vision OCR falls back to accurate mode for a failed timer.
                 values,sources=capture_elapsed_fast(reader,roi,return_sources=True)
                 with lock:
-                    for side in ('left','right'):
-                        if not tracks.tracks[side]:continue
-                        if not accept_clock(side,values.get(side,''),observed_ms,
-                                            observed_mono,sources.get(side,'fast')) and parse_elapsed(values.get(side,'')) is None:
-                            report_missing(side,values.get(side,''))
+                    for side in SIDES:
+                        raw = values.get(side, '')
+                        if parse_elapsed(raw) is not None:
+                            accept_clock(side, raw, observed_ms, observed_mono, sources[side])
+                        elif time.monotonic() - last_clock[side] > 8:
+                            report_missing(side, raw)
             except Exception as exc:
                 print('タイマーOCRの問題:',str(exc)[:160],flush=True)
             stopped.wait(0.65)
@@ -142,21 +136,32 @@ def run():
     print('rekordboxの画面は表示したままにしてください。v5.9のOCR校正を使います。')
     print('経過時間が止まる場合は DIAGNOSE_TIMERS.command で読み取り領域を確認してください。')
     last=''
+    last_error = None
+    written = False
     try:
         while not stopped.is_set():
-            with lock: snapshot=json.loads(json.dumps(state,ensure_ascii=False))
+            with lock:
+                now = time.monotonic()
+                snapshot = {side: {**state[side]} for side in SIDES}
+                for side in SIDES:
+                    if now - last_clock[side] > 8:
+                        snapshot[side]['playing'] = 'unknown'
             try:
-                send(cfg['url'],cfg['token'],snapshot)
+                request(cfg['url'], cfg['token'], decks=snapshot)
+                if not written or last_error is not None:
+                    print('接続成功 / OCR状態の書き込みを確認', flush=True)
+                written = True
+                last_error = None
                 brief=' | '.join(f'{k}: {v["artist"]} - {v["title"]} '
                                  f'{v["elapsed"]:.1f}s ({v["clockSource"]}) / {v["playing"]}'
                                  if v['elapsed'] is not None else
                                  f'{k}: {v["artist"]} - {v["title"]} --:-- (OCR待機)'
                                  for k,v in snapshot.items())
                 if brief!=last:print('送信:',brief,flush=True);last=brief
-            except urllib.error.HTTPError as exc:
-                print(f'サーバーエラー: HTTP {exc.code} / Vercel設定とアクセストークンを確認',flush=True)
-            except Exception as exc:
-                print('通信失敗:',str(exc)[:160],flush=True)
+            except BridgeRequestError as exc:
+                if str(exc) != last_error:
+                    last_error = str(exc)
+                    print(f'送信エラー: {last_error}', flush=True)
             stopped.wait(2.0)
     except KeyboardInterrupt:
         print('停止しました')

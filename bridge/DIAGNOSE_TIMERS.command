@@ -6,5 +6,7 @@ if [ ! -d .venv ]; then
   read -r -p "Enterで閉じる" || true
   exit 1
 fi
-.venv/bin/python diagnose_timers.py
+status=0
+.venv/bin/python diagnose_timers.py "$@" || status=$?
 read -r -p "Enterで閉じる" || true
+exit "$status"

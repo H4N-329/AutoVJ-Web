@@ -1,11 +1,13 @@
 import importlib.util
 import os
+import sys
 from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch, MagicMock
 
 module_path=Path(__file__).resolve().parents[1]/'bridge'/'autovj_launcher.py'
+sys.path.insert(0,str(module_path.parent))
 spec=importlib.util.spec_from_file_location('autovj_launcher',module_path)
 launcher=importlib.util.module_from_spec(spec)
 spec.loader.exec_module(launcher)

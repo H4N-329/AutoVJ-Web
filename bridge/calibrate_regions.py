@@ -24,10 +24,10 @@ except ImportError as exc:
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE / 'mac_ocr'))
 from deck_capture import (
-    CONFIG, FIELDS, LABELS, VisionOCR, default_config, read_config,
+    CONFIG, FIELDS, LABELS, VisionOCR, default_config, read_config, read_timers,
     roi_box, save_config, screenshot, valid_roi,
 )
-from playback_detector import parse_elapsed
+from playback_detector import is_remaining_time, parse_elapsed
 
 FIELD_COLORS = {
     'left_title': '#50b4ff', 'left_artist': '#50b4ff',
@@ -309,12 +309,20 @@ class Calibrator:
         def task():
             try:
                 reader=VisionOCR(HERE/'mac_ocr')
-                raw=reader.recognize([crop], fast=False)[0]
-                seconds=parse_elapsed(raw) if name.endswith('elapsed') else None
-                result=f'認識文字: {raw!r}'
                 if name.endswith('elapsed'):
-                    result += (f'\n時刻解析: {seconds:.1f}秒' if seconds is not None
-                               else '\n時刻解析: 失敗（正の経過時間が枠に入っているか確認）')
+                    values, sources = read_timers(reader, {name: crop})
+                    raw = values[name]
+                    seconds = parse_elapsed(raw)
+                    if seconds is not None:
+                        detail = f'{seconds:.2f}秒 ({sources[name]})'
+                    elif is_remaining_time(raw):
+                        detail = '残り時間を検出。経過時間の表示を選んでください。'
+                    else:
+                        detail = '未取得。経過時間の数字と記号がすべて枠内に入っているか確認してください。'
+                    result = f'認識文字: {raw!r}\n時刻解析: {detail}'
+                else:
+                    raw = reader.recognize([crop], fast=False)[0]
+                    result = f'認識文字: {raw!r}'
             except Exception as exc:
                 result='OCRエラー: '+str(exc)[:180]
             self.root.after(0, lambda: self._finish_ocr(result))

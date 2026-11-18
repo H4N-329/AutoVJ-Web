@@ -8,9 +8,9 @@ import sys
 import threading
 import tempfile
 from pathlib import Path
-from PIL import Image
+from PIL import Image, ImageOps
 from track_bridge import DATA_DIR, track_key
-from playback_detector import parse_elapsed
+from playback_detector import is_remaining_time, parse_elapsed
 
 CONFIG = DATA_DIR / 'deck_capture_config.json'  # same file as v5; safe migration
 FIELDS = ('left_title', 'left_artist', 'right_title', 'right_artist', 'left_elapsed', 'right_elapsed')
@@ -153,26 +153,43 @@ class DeckStabilizer:
         return changed
 
 
-def capture_elapsed_fast(ocr, cfg, *, return_sources=False):
-    """Recognize both deck timers, retrying bad fast reads with accurate OCR.
+def enhance_timer(crop):
+    """Improve thin digits without including pixels outside the calibrated ROI."""
+    image = ImageOps.autocontrast(crop.convert('L'))
+    right, bottom = image.width - 1, image.height - 1
+    corners = sorted(image.getpixel(point) for point in ((0, 0), (right, 0), (0, bottom), (right, bottom)))
+    background = (corners[1] + corners[2]) // 2
+    return ImageOps.expand(image, border=max(2, min(6, round(image.height * 0.15))), fill=background)
 
-    Fast Vision OCR can fail on very small thin font clock labels. The same
-    screenshot is used for retry so that timing is not skewed by re-capture.
-    """
-    shot = screenshot(cfg['display'])
-    sides = ('left', 'right')
-    crops = [shot.crop(roi_box(cfg['rois'][f'{side}_elapsed'],shot.size))
-             for side in sides]
-    raw_fast = ocr.recognize(crops,fast=True)
-    values = dict(zip(sides,raw_fast))
-    sources = {side:'fast' for side in sides}
-    missing = [side for side in sides if parse_elapsed(values[side]) is None]
+
+def read_timers(ocr, crops):
+    """Use original and contrast-enhanced crops from the same screenshot."""
+    values = dict(zip(crops, ocr.recognize(list(crops.values()), fast=True)))
+    sources = {side: 'fast' if parse_elapsed(raw) is not None else 'unreadable' for side, raw in values.items()}
+    missing = [side for side, source in sources.items()
+               if source == 'unreadable' and not is_remaining_time(values[side])]
+    if not missing:
+        return values, sources
+    accurate = ocr.recognize([crops[side] for side in missing], fast=False)
+    for side, original in zip(missing, accurate):
+        if parse_elapsed(original) is not None:
+            values[side], sources[side] = original, 'accurate-fallback'
+        else:
+            values[side] = original or values[side]
+    missing = [side for side in missing if sources[side] == 'unreadable' and not is_remaining_time(values[side])]
     if missing:
-        accurate = ocr.recognize([crops[sides.index(side)] for side in missing],fast=False)
-        for side, result in zip(missing,accurate):
-            if parse_elapsed(result) is not None:
-                values[side] = result
-                sources[side] = 'accurate-fallback'
-            else:
-                sources[side] = 'unreadable'
+        contrast = ocr.recognize([enhance_timer(crops[side]) for side in missing], fast=False)
+        for side, raw in zip(missing, contrast):
+            if parse_elapsed(raw) is not None:
+                values[side], sources[side] = raw, 'contrast-fallback'
+    return values, sources
+
+
+def timer_crops(shot, cfg):
+    return {side: shot.crop(roi_box(cfg['rois'][f'{side}_elapsed'], shot.size)) for side in ('left', 'right')}
+
+
+def capture_elapsed_fast(ocr, cfg, *, return_sources=False):
+    shot = screenshot(cfg['display'])
+    values, sources = read_timers(ocr, timer_crops(shot, cfg))
     return (values,sources) if return_sources else values

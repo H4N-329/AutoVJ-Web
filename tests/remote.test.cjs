@@ -9,6 +9,7 @@ const oldFetch=global.fetch;
 const mem=new Map();
 const mockFetch=async(url,opts)=>{const cmd=JSON.parse(opts.body);const [name,key,...rest]=cmd;let result;
  if(name==='GET')result=mem.get(key)??null;
+ else if(name==='MGET')result=[key,...rest].map(k=>mem.get(k)??null);
  else if(name==='SET'){mem.set(key,rest[0]);result='OK'}
  else if(name==='INCR'){const n=Number(mem.get(key)||0)+1;mem.set(key,String(n));result=n}
  else if(name==='EXPIRE'){result=1}
@@ -30,4 +31,35 @@ test('unfinished command never advances cursor and can be retried',async()=>{mem
 test('iPadへ未取得の時刻を0秒と偽って渡さない',()=>{
  const s=handler.cleanState({decks:{left:{title:'A',artist:'B',elapsed:null},right:{}}});
  assert.equal(s.decks.left.elapsed,null);
+});
+
+test('25操作を2回のRedis問い合わせで順番に取得する',async()=>{
+ const session='BATCH61',base='autovj:remote:v61:'+session+':';
+ mem.set(base+'seq','25');
+ for(let seq=1;seq<=25;seq++)mem.set(base+'cmd:'+seq,JSON.stringify({seq,createdAt:Date.now(),command:{type:'arm',side:seq%2?'left':'right'}}));
+ const calls=[];
+ global.fetch=async(url,options)=>{calls.push(JSON.parse(options.body));return mockFetch(url,options)};
+ try{
+  const result=await run(req('GET','commands',null,session));
+  assert.equal(result.body.commands.length,25);
+  assert.deepEqual(result.body.commands.map(c=>c.seq),Array.from({length:25},(_,i)=>i+1));
+  assert.deepEqual(calls.map(c=>c[0]),['GET','MGET']);
+ }finally{global.fetch=mockFetch}
+});
+
+test('期限切れ操作と不正カーソルを処理する',async()=>{
+ const base='autovj:remote:v61:EXPIRE6:';
+ mem.set(base+'seq','1');mem.set(base+'cmd:1',JSON.stringify({seq:1,createdAt:Date.now()-31000,command:{type:'take',side:'right'}}));
+ const result=await run(req('GET','commands',null,'EXPIRE6',TOKEN,0));
+ assert.equal(result.body.commands.length,0);assert.equal(result.body.seq,1);
+ assert.equal((await run(req('GET','commands',null,'EXPIRE6',TOKEN,Infinity))).code,400);
+ const reset=await run(req('GET','commands',null,'EMPTY66',TOKEN,99));
+ assert.equal(reset.body.seq,0);
+});
+
+test('Redisの操作番号が戻った後も最初の新操作を取得',async()=>{
+ const base='autovj:remote:v61:RESET66:';
+ mem.set(base+'seq','1');mem.set(base+'cmd:1',JSON.stringify({seq:1,createdAt:Date.now(),command:{type:'take',side:'right'}}));
+ const result=await run(req('GET','commands',null,'RESET66',TOKEN,99));
+ assert.equal(result.body.seq,1);assert.equal(result.body.commands[0].command.side,'right');
 });

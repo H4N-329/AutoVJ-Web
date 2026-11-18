@@ -9,12 +9,17 @@ import re
 import unicodedata
 
 
+def normalized_timer(raw: str) -> str:
+    text = ''.join(unicodedata.normalize('NFKC', str(raw or '')).split())
+    return text.replace(',', '.').replace('∶', ':')
+
+
+def is_remaining_time(raw: str) -> bool:
+    return normalized_timer(raw).startswith(('-', '−', '–', '—'))
+
+
 def parse_elapsed(raw: str) -> float | None:
-    text = unicodedata.normalize('NFKC', str(raw or '')).strip().replace(' ', '')
-    text = text.replace('．', '.').replace('，', '.')
-    # STRICT: never accept negative remaining-time indicators.
-    if not text or text.startswith(('-', '−', '–')):
-        return None
+    text = normalized_timer(raw)
     match = re.fullmatch(r'(\d{1,2}):(\d{2})(?::(\d{2}))?(?:\.(\d{1,2}))?', text)
     if not match:
         return None
@@ -23,7 +28,7 @@ def parse_elapsed(raw: str) -> float | None:
         hours = 0
     else:
         hours, minutes, seconds = int(match.group(1)), int(match.group(2)), int(match.group(3))
-    if seconds > 59 or minutes > 59 and hours > 0:
+    if seconds > 59 or (match.group(3) is not None and minutes > 59):
         return None
     fraction = match.group(4)
     return hours * 3600 + minutes * 60 + seconds + (int(fraction) / (10 ** len(fraction)) if fraction else 0)

@@ -49,3 +49,19 @@ test('OCRの取得日時を通信日時から分離して保存する',()=>{
  const x=bridge.validate({decks:{left:{title:'曲',artist:'作者',elapsed:99.3,clockObservedAt:measured,clockSource:'accurate-fallback',playing:'playing'},right:{}}});
  assert.equal(x.decks.left.elapsed,99.3);assert.equal(x.decks.left.clockObservedAt,measured);assert.equal(x.decks.left.clockSource,'accurate-fallback');
 });
+
+test('認証未設定と不一致を識別し、秘密値を応答に含めない',async()=>{
+ delete process.env.AUTOVJ_ACCESS_TOKEN;
+ const missing=res();await bridge({method:'GET',headers:{}},missing);
+ assert.equal(missing.code,503);assert.equal(missing.body.code,'AUTOVJ_TOKEN_NOT_CONFIGURED');
+ assert.equal(yt.authorized({headers:{}}),false);
+ process.env.AUTOVJ_ACCESS_TOKEN='test-expected-private-token';
+ const rejected=res();await bridge({method:'GET',headers:{'x-autovj-token':'test-wrong-token'}},rejected);
+ assert.equal(rejected.code,401);assert.equal(rejected.body.code,'AUTOVJ_TOKEN_REJECTED');
+ assert.ok(!JSON.stringify(rejected.body).includes('test-expected-private-token'));
+});
+
+test('ブリッジの不正JSONは400',async()=>{
+ const result=res();await bridge({method:'POST',headers:{'x-autovj-token':process.env.AUTOVJ_ACCESS_TOKEN},body:'{'},result);
+ assert.equal(result.code,400);
+});

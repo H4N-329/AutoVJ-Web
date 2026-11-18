@@ -1,3 +1,5 @@
+> v6.4.1の更新手順と現在の起動方法は UPDATE_GUIDE_JA.md を参照してください。
+
 # AutoVJ Web v6.1 — GitHub/Vercelへの公開
 
 ## A. Vercelへデプロイ

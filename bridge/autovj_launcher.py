@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""One-click macOS launcher for AutoVJ Web v6.2.x.
+"""Manual and one-click macOS launchers for AutoVJ Web.
 
 This program does not change the web app, store tokens in URLs, or collect
 screenshots/audio. Browser windows use the user's normal browser profile.
@@ -15,8 +15,10 @@ import re
 import signal
 import subprocess
 import sys
+import tempfile
 import time
-from urllib.parse import urlsplit
+
+from bridge_http import normalize_url, request
 
 BRIDGE_DIR = Path(__file__).resolve().parent
 PROJECT_DIR = BRIDGE_DIR.parent
@@ -86,39 +88,45 @@ def read_json(path, default):
 
 def private_write(path, data):
     path.parent.mkdir(parents=True, exist_ok=True)
-    temp = path.with_name(path.name + '.tmp')
-    temp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding='utf-8')
-    os.chmod(temp, 0o600)
-    os.replace(temp, path)
+    with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', dir=path.parent, delete=False) as file:
+        temp = Path(file.name)
+        try:
+            json.dump(data, file, ensure_ascii=False, indent=2)
+            file.close()
+            os.replace(temp, path)
+        finally:
+            temp.unlink(missing_ok=True)
 
 
-def normalize_url(raw):
-    url = raw.strip().rstrip('/')
-    parsed = urlsplit(url)
-    if parsed.scheme != 'https' and not (parsed.scheme == 'http' and parsed.hostname in ('localhost','127.0.0.1')):
-        raise ValueError('https:// で始まる公開URL（またはローカルテスト用http://localhost）を指定してください。')
-    if not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment or parsed.path not in ('','/'):
-        raise ValueError('URLは AutoVJ Web のトップページのURLだけを指定してください。')
-    if any(ch in url for ch in ('\n','\r','\x00')):
-        raise ValueError('URLに不正な文字が含まれています。')
-    return url
-
-
-def load_setup(interactive=True):
-    settings = {**DEFAULTS, **read_json(SETTINGS,{})}
+def load_bridge_config(*, prompt=False, edit=False):
     c = read_json(CONFIG,{})
-    if c.get('url'):
-        c['url'] = normalize_url(c['url'])
-    if interactive and not c.get('url'):
-        print('初回設定：Vercelに公開したAutoVJのURLを入力してください。')
-        c['url'] = normalize_url(input('URL: '))
-    if interactive and not c.get('token'):
-        c['token'] = getpass.getpass('AUTOVJ_ACCESS_TOKEN（入力は画面に表示されません）: ').strip()
-    if interactive and (not c.get('token') or len(c['token']) < 16):
-        raise ValueError('連携アクセストークンは16文字以上が必要です。')
-    if interactive:
-        private_write(CONFIG,c)
-    return c, settings
+    url = c.get('url') if isinstance(c.get('url'), str) else ''
+    token = c['token'].strip() if isinstance(c.get('token'), str) else ''
+    if prompt and (edit or not url):
+        suffix = '［Enterで保存済みURLを使用］' if url else ''
+        url = input(f'AutoVJのVercel本番URL{suffix}: ').strip() or url
+    if not url or (not token and not prompt):
+        raise ValueError('CONFIGURE_AUTOVJ.command でVercelの本番URLと連携トークンを設定してください。')
+    url = normalize_url(url)
+    if prompt and (edit or not token):
+        suffix = '［Enterで保存済みの値を使用］' if token else ''
+        token = getpass.getpass(f'AUTOVJ_ACCESS_TOKEN{suffix}: ').strip() or token
+    if not re.fullmatch(r'[ -~]{16,}', token):
+        raise ValueError('連携トークンには16文字以上の半角英数字・半角記号を使用してください。CONFIGURE_AUTOVJ.command で変更できます。')
+    updated = {**c, 'url': url, 'token': token}
+    if prompt:
+        if updated != c:
+            private_write(CONFIG, updated)
+        elif CONFIG.stat().st_mode & 0o077:
+            CONFIG.chmod(0o600)
+    return updated
+
+
+def check_connection():
+    c = load_bridge_config()
+    request(c['url'], c['token'])
+    print('HTTP 200 / AutoVJ認証とUpstash Redisの読み取りを確認しました。')
+    print('書き込みは START_BRIDGE.command の「接続成功 / OCR状態の書き込みを確認」で確認できます。')
 
 
 def ask_bool(text, default):
@@ -128,7 +136,8 @@ def ask_bool(text, default):
 
 
 def configure():
-    c, settings = load_setup(True)
+    c = load_bridge_config(prompt=True, edit=True)
+    settings = {**DEFAULTS, **read_json(SETTINGS,{})}
     print('\n起動設定（あとから CONFIGURE_AUTOVJ.command で変更できます）')
     current=settings.get('browser','Google Chrome')
     print(f'ブラウザの選択: 1 Google Chrome / 2 Safari（現在: {current}）')
@@ -258,7 +267,8 @@ def front_rekordbox():
 def start():
     if sys.platform!='darwin':
         raise RuntimeError('この起動ツールはmacOS専用です。')
-    c,s=load_setup(True)
+    c = load_bridge_config(prompt=True)
+    s = {**DEFAULTS, **read_json(SETTINGS,{})}
     if not SETTINGS.is_file():
         private_write(SETTINGS,s)
     print('AutoVJ One Click — 起動中\n')
@@ -270,6 +280,15 @@ def start():
     print('初回は「設定」でMacブリッジ監視をON、iPad操作をONにしてください（以後はブラウザに保存）。')
     print('プロジェクターへ出力画面を移動する操作は、ディスプレイ配置により手動確認が必要です。')
     print('監視ログ:',LOGFILE)
+
+
+def start_bridge():
+    if sys.platform != 'darwin':
+        raise RuntimeError('この起動ツールはmacOS専用です。')
+    if existing_bridge() or other_bridge_process():
+        raise RuntimeError('監視ブリッジは起動済みです。既存のターミナルでCtrl+C、またはSTOP_AUTOVJ.commandで停止してください。')
+    py = ensure_venv()
+    os.execv(py, [str(py), str(BRIDGE_DIR/'rekordbox_bridge.py')])
 
 
 def stop():
@@ -295,10 +314,12 @@ def status():
 
 def main(argv=None):
     ap=argparse.ArgumentParser(description='AutoVJ Mac one-click startup')
-    ap.add_argument('action',nargs='?',choices=('start','configure','stop','status'),default='start')
+    actions = {'start': start, 'configure': configure, 'stop': stop, 'status': status,
+               'start-bridge': start_bridge, 'check-connection': check_connection}
+    ap.add_argument('action', nargs='?', choices=actions, default='start')
     args=ap.parse_args(argv)
     try:
-        {'start':start,'configure':configure,'stop':stop,'status':status}[args.action]()
+        actions[args.action]()
         return 0
     except (ValueError,RuntimeError,subprocess.CalledProcessError,EOFError,PermissionError) as e:
         print('起動操作エラー:',e,file=sys.stderr)
