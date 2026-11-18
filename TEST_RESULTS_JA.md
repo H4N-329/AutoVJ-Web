@@ -33,4 +33,20 @@ UI回帰テストはHTMLと実際のスクリプトを読み、DOM・動画・�
 - YouTube実サービスでの検索、埋め込み再生、シークとMV別編集の補正。
 - iPad第6世代Safari、スリープ復帰、現場Wi-Fi、プロジェクター出力の同時運用。
 
-本番URLは https://autovj-web.vercel.app 。本番の確認では新トークンでの認証、旧トークンの拒否、独立した検証セッションでのRedis状態保存・参照・操作順序を確認する。
+## 本番で確認済み
+
+本番URL https://autovj-web.vercel.app に、修正コミット 63ca64d7dd05543dffed1a0cbcdef7e8e22429ac を反映して確認。
+
+- VercelのProductionデプロイはREADY。
+- 公開したapp.js、output.js、controller.jsは、検証済みソースとSHA-256が一致。
+- 新トークンでMac Bridge APIへ接続し、Redisの読み取りが成功。
+- トークンなし、誤トークン、公開されていた旧トークンはいずれも401で拒否。
+- /bridge/bridge_config.json は404。
+- 独立した検証セッションでUpstashへの状態保存・参照と、ARM→SEEKの操作順序が成功。
+- YouTube本番APIでMV候補検索が成功。
+- クラウドChromeでDJ LIVE、MV事前設定、MV検索・管理、設定の4タブを表示。
+- 当該デプロイを対象に、確認時点の直近10分のerror/fatalログは検出されなかった。
+
+AutoVJが使用する共有データ基盤はUpstash Redis。現行ソースとVercel環境変数にSupabaseの利用箇所は確認されなかった。
+
+Mac、iPad、実動画とプロジェクターを組み合わせる実機検証は、上記「利用者の実機で確認する項目」を参照。
